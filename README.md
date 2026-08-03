@@ -39,8 +39,8 @@ La librairie fournit une interface stable pour les scripts de monitoring, bots D
 ### Depuis les sources
 
 ```bash
-git clone https://github.com/<organisation>/<depot>.git
-cd <depot>
+git clone https://github.com/noan-hbt/vintify
+cd vintify
 
 python -m venv .venv
 source .venv/bin/activate
