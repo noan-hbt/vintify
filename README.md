@@ -66,6 +66,7 @@ Le fichier `requirements.txt` contient :
 ```txt
 cloudscraper>=1.2.71
 tqdm>=4.66.0
+brotli
 ```
 
 `tqdm` est optionnel à l’exécution. Si le paquet n’est pas installé, les fonctionnalités de progression sont simplement désactivées.
