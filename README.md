@@ -424,6 +424,63 @@ Sous Windows PowerShell :
 $env:VINTED_SESSION = "votre_cookie_de_session"
 ```
 
+## Achat (checkout) et bypass DataDome
+
+Le flux d'achat (build checkout, paiement) et le gateway `api.vinted.fr`
+(points relais) sont protégés par **DataDome** : sans contournement, ils
+renvoient `403` (challenge slider en JSON inline sur `www.vinted.fr`, block
+page HTML sur `api.vinted.fr`).
+
+### Résolution DataDome via Hyper Solutions
+
+Le bypass est intégré et automatique :
+
+1. Installer le client TLS imitant Chrome : `pip install curl_cffi`.
+2. Fournir la clé API Hyper Solutions (<https://docs.hypersolutions.co>) au
+   constructeur (`hypersolutions_api_key=` ou variable d'environnement
+   `HYPERSOLUTIONS_API_KEY`).
+3. Le cookie `datadome` de votre navigateur (optionnel mais recommandé) :
+   requis par le gateway `api.vinted.fr`. Il se met dans le `cookie_file`.
+
+```python
+from vinted_scraper import VintedScraper
+
+with VintedScraper(
+    domain="fr",
+    cookie_file="vinted_session.json",      # session + JWT + datadome navigateur
+    hypersolutions_api_key=os.environ["HYPER_API_KEY"],
+) as v:
+    # 1. transaction (créée automatiquement si besoin)
+    t = v.create_transaction([item_id], seller_id)
+    # 2. build du checkout (résout le challenge DataDome automatiquement)
+    co = v.build_checkout(t["id"], purchase_type="transaction")
+    checkout_id = co["checkout"]["id"]
+    # 3. points relais autour de l'adresse (gateway api.vinted.fr)
+    pts = v.get_nearby_pickup_points(checkout_id, latitude, longitude)
+    # 4. sélection d'un point (rate_uuid doit correspondre au transporteur)
+    v.select_pickup_point(
+        checkout_id,
+        rate_uuid=pts["shipping_rates"][0]["rate_uuid"],
+        point_code=pts["shipping_points"][0]["point"]["code"],
+        point_uuid=pts["shipping_points"][0]["point"]["uuid"],
+    )
+    # 5. paiement — ⚠️ débite réellement : confirm=True est obligatoire
+    co = v.get_checkout(checkout_id)["checkout"]
+    v.pay_checkout(checkout_id, checksum=co["checksum"], card_id=298093835, confirm=True)
+```
+
+Points d'attention :
+
+- Le `checksum` change à chaque `update_checkout` : relisez le checkout avant
+  de payer.
+- Le `point_code`/`point_uuid` doivent appartenir au transporteur du
+  `rate_uuid` choisi (un point Chronopost ne se sélectionne pas avec un tarif
+  Mondial Relay).
+- Le cookie `datadome` du navigateur expire (~30 min à 2 h) : recopiez-le
+  avec les cookies de session quand le gateway refuse (`403 access_denied`).
+- Le gateway refuse le header `Authorization` (Bearer) : géré automatiquement
+  par `get_nearby_pickup_points`.
+
 ## Téléchargement des photos
 
 ```python
