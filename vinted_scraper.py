@@ -60,6 +60,7 @@ __all__ = [
     "VintedResponseError",
     "normalize_item",
     "normalize_user",
+    "item_id_from_url",
     "KNOWN_DOMAINS",
 ]
 
@@ -115,6 +116,8 @@ _CSRF_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+name=["\']csrf-token["\']', re.I),
     re.compile(r'["\']CSRF_TOKEN["\']\s*:\s*["\']([^"\']+)["\']'),
     re.compile(r'["\']csrfToken["\']\s*:\s*["\']([^"\']+)["\']'),
+    # JSON échappé dans le script Next.js : \"CSRF_TOKEN\":\"<uuid>\"
+    re.compile(r'\\?"CSRF_TOKEN\\?"\s*:\s*\\?"([^"\\]+)', re.I),
 )
 
 # Clés susceptibles de contenir la liste utile dans une réponse paginée.
@@ -231,6 +234,15 @@ def _clean_params(params: Mapping[str, Any] | None) -> dict[str, Any]:
         else:
             out[key] = value
     return out
+
+
+def item_id_from_url(url: str) -> int | None:
+    """
+    Extrait l'id d'article d'une URL Vinted (``…/items/{id}-{slug}``).
+    Renvoie ``None`` si ce n'est pas une URL d'article.
+    """
+    match = re.search(r"/items/(\d+)(?:-[^/?]*)?", url or "")
+    return int(match.group(1)) if match else None
 
 
 def _price_to_float(value: Any) -> float | None:
@@ -458,6 +470,21 @@ class VintedScraper:
     session_cookie :
         Valeur du cookie ``_vinted_<x>_session``, requise pour les endpoints
         authentifiés (messagerie).
+    cookie_header :
+        En-tête ``Cookie`` complet copié depuis le navigateur (DevTools) :
+        installe tous les cookies (datadome, cf_clearance, JWT…). Recommandé
+        pour les offres/achat, qui exigent aussi ``access_token_web``.
+    access_token :
+        Valeur du cookie ``access_token_web`` (JWT) : posé en
+        ``Authorization: Bearer``. Requis par les endpoints d'offres ;
+        automatique si fourni via ``cookie_header``.
+    cookie_file :
+        Chemin d'un fichier JSON persistant les cookies essentiels
+        (session, ``access_token_web``, ``refresh_token_web``, ``anon_id``).
+        Chargé au démarrage si aucun cookie n'est fourni, mis à jour à
+        chaque ``refresh_token()`` — évite de recopier les cookies à
+        chaque expiration du JWT (~2 h). Fichier sensible : ne pas
+        committer. Le ``refresh_token_web`` expire ~7 jours.
     timeout, retries :
         Comportement réseau ; ``retries`` s'applique aux 429/5xx et erreurs
         transport.
@@ -473,6 +500,9 @@ class VintedScraper:
         *,
         session_cookie: str | None = None,
         session_cookie_name: str | None = None,
+        cookie_header: str | None = None,
+        access_token: str | None = None,
+        cookie_file: str | Path | None = None,
         timeout: int = DEFAULT_TIMEOUT,
         retries: int = DEFAULT_RETRIES,
         verbose: bool = False,
@@ -498,6 +528,17 @@ class VintedScraper:
         self.csrf_token: str | None = None
         self.session_cookie = session_cookie
         self.session_cookie_name = session_cookie_name or self._default_cookie_name()
+        self._cookie_header = cookie_header
+        self._access_token = access_token
+        self.cookie_file = Path(cookie_file) if cookie_file else None
+        if (not self._cookie_header and not self.session_cookie
+                and self.cookie_file and self.cookie_file.exists()):
+            loaded = self._load_cookie_file(self.cookie_file)
+            if loaded:
+                self._cookie_header = "; ".join(
+                    f"{name}={value}" for name, value in loaded.items()
+                )
+                log.debug("Session chargée depuis %s.", self.cookie_file)
 
         self._last_request_ts = 0.0
         self._initializers_cache: dict[str, Any] | None = None
@@ -519,10 +560,19 @@ class VintedScraper:
             self.session.proxies.update(dict(proxies))
         self.session.headers.update(self._default_headers())
 
-        if self.session_cookie:
-            self._install_session_cookie(self.session_cookie)
         if bootstrap:
             self.refresh_session()
+        # Ré-applique nos cookies APRÈS le bootstrap : la homepage en pose
+        # d'anonymes (anon_id, access_token_web, _vinted_fr_session…) qu'il
+        # faut écraser pour conserver la session fournie.
+        if self._cookie_header:
+            self._install_cookies(self._cookie_header)
+        elif self.session_cookie:
+            self._install_session_cookie(self.session_cookie)
+        self._sync_auth_headers()
+        # persiste le fichier de session (les refresh_token() le mettront à jour)
+        if self.cookie_file and (self._cookie_header or self.session_cookie):
+            self._save_cookie_file()
 
     def __enter__(self) -> "VintedScraper":
         return self
@@ -566,10 +616,136 @@ class VintedScraper:
         }
 
     def _install_session_cookie(self, value: str) -> None:
+        self._clear_cookie(self.session.cookies, self.session_cookie_name)
         self.session.cookies.set(
             self.session_cookie_name, value, domain=f".vinted.{self.domain}", path="/"
         )
         log.debug("Cookie de session installé (%s).", self.session_cookie_name)
+
+    @staticmethod
+    def _clear_cookie(cookie_jar: Any, name: str) -> None:
+        """Supprime tous les cookies d'un nom donné, quel que soit leur domaine."""
+        for cookie in list(cookie_jar):
+            if cookie.name == name:
+                cookie_jar.clear(cookie.domain, cookie.path, cookie.name)
+
+    @staticmethod
+    def _cookie_value(cookie_jar: Any, name: str) -> str | None:
+        """Première valeur d'un cookie (robuste aux homonymes multi-domaines)."""
+        for cookie in cookie_jar:
+            if cookie.name == name and cookie.value:
+                return cookie.value
+        return None
+
+    def _sync_auth_headers(self) -> None:
+        """
+        Pose ``Authorization: Bearer <access_token_web>`` si le JWT est
+        disponible (cookie fourni via ``cookie_header`` ou paramètre
+        ``access_token``). Requis par les endpoints d'offres/achat.
+        """
+        token = self._access_token or self._cookie_value(
+            self.session.cookies, "access_token_web"
+        )
+        if token:
+            self.session.headers["Authorization"] = f"Bearer {token}"
+            log.debug("Authorization Bearer posé.")
+        else:
+            self.session.headers.pop("Authorization", None)
+
+    def refresh_token(self) -> dict[str, Any] | None:
+        """
+        Rafraîchit les JWT via ``POST /web/api/auth/refresh``
+        (``refresh_token_web`` → nouveau ``access_token_web`` + nouveau
+        ``refresh_token_web``). Met à jour le header ``Authorization``,
+        les cookies et le fichier de session si configuré.
+
+        Renvoie la réponse brute, ou ``None`` si aucun refresh token
+        disponible / refusé. Le refresh token tourne à chaque appel
+        (l'ancien est invalidé).
+        """
+        refresh = self._cookie_value(self.session.cookies, "refresh_token_web")
+        if not refresh:
+            return None
+        self._throttle()
+        try:
+            response = self.session.post(
+                self._url("/web/api/auth/refresh"), timeout=self.timeout
+            )
+        except Exception as exc:
+            log.warning("Refresh token : erreur transport (%s).", exc)
+            return None
+        finally:
+            self._last_request_ts = time.monotonic()
+
+        if response.status_code != 200:
+            log.warning("Refresh token refusé (HTTP %d).", response.status_code)
+            return None
+        payload = self._parse_json(response)
+        access = (
+            payload.get("access_token")
+            if isinstance(payload, Mapping) else None
+        )
+        if not access:
+            return None
+
+        # remplace l'access_token_web dans le jar
+        self._clear_cookie(self.session.cookies, "access_token_web")
+        self.session.cookies.set(
+            "access_token_web", access, domain=f".vinted.{self.domain}", path="/"
+        )
+        # le nouveau refresh_token_web arrive en Set-Cookie : normalise son domaine
+        new_refresh: str | None = None
+        for cookie in self.session.cookies:
+            if cookie.name == "refresh_token_web" and cookie.value != refresh:
+                new_refresh = cookie.value
+        if new_refresh:
+            self._clear_cookie(self.session.cookies, "refresh_token_web")
+            self.session.cookies.set(
+                "refresh_token_web", new_refresh,
+                domain=f".vinted.{self.domain}", path="/",
+            )
+        self._sync_auth_headers()
+        if self.cookie_file:
+            self._save_cookie_file()
+        log.info("Tokens rafraîchis (access_token_web + refresh_token_web).")
+        return payload
+
+    def _save_cookie_file(self) -> None:
+        """Persiste les cookies essentiels (session + JWT) en JSON clair."""
+        names = (self.session_cookie_name, "access_token_web", "refresh_token_web", "anon_id")
+        data = {name: value for name in names
+                if (value := self._cookie_value(self.session.cookies, name))}
+        try:
+            self.cookie_file.write_text(
+                json.dumps(data, indent=2), encoding="utf-8"
+            )
+            log.debug("Session sauvegardée (%s).", self.cookie_file)
+        except OSError as exc:
+            log.warning("Impossible d'écrire %s : %s", self.cookie_file, exc)
+
+    @staticmethod
+    def _load_cookie_file(path: Path) -> dict[str, str] | None:
+        """Charge un fichier de session JSON → dict nom/valeur de cookies."""
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        return {str(k): str(v) for k, v in data.items() if v} if isinstance(data, dict) else None
+
+    def _install_cookies(self, cookie_header: str) -> None:
+        """
+        Installe tous les cookies d'un en-tête ``Cookie`` brut
+        (``"k=v; k2=v2"`` — copier-collable depuis DevTools).
+        """
+        for part in cookie_header.split(";"):
+            name, sep, value = part.strip().partition("=")
+            if not sep or not name:
+                continue
+            self._clear_cookie(self.session.cookies, name)
+            self.session.cookies.set(
+                name, value, domain=f".vinted.{self.domain}", path="/"
+            )
+        log.debug("%d paires cookie installées.", cookie_header.count("="))
 
     def refresh_session(self) -> str | None:
         """
@@ -607,9 +783,17 @@ class VintedScraper:
             self.session.headers.pop("X-CSRF-Token", None)
             log.warning("Aucun token CSRF trouvé sur la homepage.")
 
-        anon_id = self.session.cookies.get("anon_id")
+        anon_id = self._cookie_value(self.session.cookies, "anon_id")
         if anon_id:
             self.session.headers["X-Anon-Id"] = anon_id
+
+        # Ré-applique les cookies fournis : la réponse de la homepage peut
+        # avoir posé des cookies anonymes/renouvelés par-dessus les nôtres.
+        if self._cookie_header:
+            self._install_cookies(self._cookie_header)
+        elif self.session_cookie:
+            self._install_session_cookie(self.session_cookie)
+        self._sync_auth_headers()
         return self.csrf_token
 
     @staticmethod
@@ -622,7 +806,13 @@ class VintedScraper:
 
     @property
     def is_authenticated(self) -> bool:
-        return bool(self.session.cookies.get(self.session_cookie_name))
+        # itération plutôt que cookies.get() : Vinted peut poser plusieurs
+        # cookies homonymes (domaines .vinted.fr / .www.vinted.fr), ce qui
+        # ferait lever CookieConflictError à cookies.get().
+        return any(
+            cookie.name == self.session_cookie_name and bool(cookie.value)
+            for cookie in self.session.cookies
+        )
 
     # -- couche HTTP ------------------------------------------------------- #
 
@@ -644,16 +834,18 @@ class VintedScraper:
         delay = min(BASE_DELAY * (2 ** attempt), MAX_DELAY)
         return delay * random.uniform(0.85, 1.25)  # jitter
 
-    def _get(
+    def _request(
         self,
+        method: str,
         path: str,
-        params: Mapping[str, Any] | None = None,
         *,
+        params: Mapping[str, Any] | None = None,
+        json_body: Mapping[str, Any] | None = None,
         retries: int | None = None,
         require_auth: bool = False,
     ) -> Any:
         """
-        GET JSON avec retry exponentiel.
+        Requête JSON (GET/POST) avec retry exponentiel.
 
         Erreurs traduites : 429 → ``VintedRateLimitError``,
         401/403 → ``VintedAuthError`` (après tentative de refresh CSRF),
@@ -673,9 +865,14 @@ class VintedScraper:
 
         for attempt in range(attempts + 1):
             self._throttle()
-            log.debug("GET %s params=%s (essai %d/%d)", url, query, attempt + 1, attempts + 1)
+            log.debug(
+                "%s %s params=%s body=%s (essai %d/%d)",
+                method, url, query, json_body, attempt + 1, attempts + 1,
+            )
             try:
-                response = self.session.get(url, params=query, timeout=self.timeout)
+                response = self.session.request(
+                    method, url, params=query, json=json_body, timeout=self.timeout
+                )
             except Exception as exc:
                 last_error = VintedError(f"Erreur transport : {exc}", url=url)
                 if attempt >= attempts:
@@ -687,7 +884,7 @@ class VintedScraper:
 
             status = response.status_code
 
-            if status == 200:
+            if status in (200, 201):
                 return self._parse_json(response)
 
             if status == 429:
@@ -705,16 +902,30 @@ class VintedScraper:
                 time.sleep(min(delay, MAX_DELAY))
                 continue
 
-            if status in (401, 403):
+            login_required = status == 400 and "user_login_required" in (response.text or "")
+            if status in (401, 403) or login_required:
                 if self.auto_refresh_csrf and not refreshed and attempt < attempts:
                     refreshed = True
-                    log.info("%s sur %s → rafraîchissement de la session.", status, path)
+                    log.info(
+                        "%s sur %s → rafraîchissement des tokens de session.",
+                        status, path,
+                    )
                     try:
-                        self.refresh_session()
+                        # 1) refresh JWT (refresh_token_web) ; 2) sinon
+                        # re-bootstrap de la session (CSRF + cookies).
+                        if not self.refresh_token():
+                            self.refresh_session()
                     except VintedError as exc:
                         raise VintedAuthError(str(exc), status=status, url=url) from exc
                     time.sleep(self._backoff(attempt))
                     continue
+                if login_required:
+                    raise VintedAuthError(
+                        "Session non authentifiée (token expiré ?).",
+                        status=status,
+                        url=url,
+                        body=response.text[:300],
+                    )
                 raise VintedAuthError(
                     "Accès refusé : CSRF expiré, cookie invalide ou IP bloquée.",
                     status=status,
@@ -737,6 +948,32 @@ class VintedScraper:
             )
 
         raise last_error or VintedError("Échec de la requête", url=url)
+
+    def _get(
+        self,
+        path: str,
+        params: Mapping[str, Any] | None = None,
+        *,
+        retries: int | None = None,
+        require_auth: bool = False,
+    ) -> Any:
+        """GET JSON — mêmes règles d'erreur que ``_request``."""
+        return self._request(
+            "GET", path, params=params, retries=retries, require_auth=require_auth
+        )
+
+    def _post(
+        self,
+        path: str,
+        *,
+        json_body: Mapping[str, Any] | None = None,
+        retries: int | None = None,
+        require_auth: bool = False,
+    ) -> Any:
+        """POST JSON — mêmes règles d'erreur que ``_request``."""
+        return self._request(
+            "POST", path, json_body=json_body, retries=retries, require_auth=require_auth
+        )
 
     @staticmethod
     def _parse_json(response: Any) -> Any:
@@ -1218,6 +1455,225 @@ class VintedScraper:
                 thread_id = thread.get("id")
                 return self.get_thread(thread_id) if thread_id else thread
         return {}
+
+    # ------------------------------------------------------------------ #
+    # Offres (cookie de session requis)
+    # ------------------------------------------------------------------ #
+
+    def get_offer_request_options(
+        self,
+        item_ids: Sequence[int | str],
+        seller_id: int | str,
+        item_price: float | int | str,
+        currency: str = "EUR",
+    ) -> dict[str, Any]:
+        """
+        Contraintes d'offre pour un ou plusieurs articles
+        (``POST /api/v2/offers/request_options``).
+
+        Ne crée rien : renvoie le dict complet de la réponse
+        (``request_options`` : min/max price, remise max, nombre
+        d'offres restantes, suggestions…).
+        """
+        payload = self._post(
+            "/api/v2/offers/request_options",
+            json_body={
+                "price": {
+                    "amount": str(item_price),
+                    "currency_code": currency,
+                },
+                "item_ids": [int(item_id) for item_id in item_ids],
+                "seller_id": int(seller_id),
+            },
+            require_auth=True,
+        )
+        return payload if isinstance(payload, Mapping) else {}
+
+    def make_offer(
+        self,
+        transaction_id: int | str,
+        price: float | int | str,
+        currency: str = "EUR",
+    ) -> dict[str, Any]:
+        """
+        Envoie une offre sur une transaction
+        (``POST /api/v2/transactions/{id}/offer_requests``).
+
+        Succès : ``{"offer_request": {id, transaction_id, status: 10,
+        price}, "code": 0}`` — renvoie le dict complet.
+        """
+        payload = self._post(
+            f"/api/v2/transactions/{transaction_id}/offer_requests",
+            json_body={
+                "offer_request": {
+                    "price": str(price),
+                    "currency": currency,
+                },
+            },
+            require_auth=True,
+        )
+        return payload if isinstance(payload, Mapping) else {}
+
+    def create_transaction(
+        self,
+        item_ids: Sequence[int | str],
+        seller_id: int | str,
+        buyer_id: int | str | None = None,
+    ) -> dict[str, Any]:
+        """
+        Crée la conversation + transaction d'achat pour un article
+        (``POST /api/v2/conversations``, initiator
+        ``buyer_enters_offer_form``). Étape préalable à ``make_offer`` :
+        renvoie le dict de la transaction, dont l'``id`` sert ensuite
+        d'``transaction_id``.
+
+        Effet de bord : ouvre un fil de conversation avec le vendeur
+        (comme si l'acheteur cliquait « Faire une offre » sur la page
+        article). ``buyer_id`` est ignoré (déduit de la session).
+        """
+        payload = self._post(
+            "/api/v2/conversations",
+            json_body={
+                "initiator": "buyer_enters_offer_form",
+                "item_id": int(item_ids[0]),
+                "opposite_user_id": int(seller_id),
+            },
+            require_auth=True,
+        )
+        if isinstance(payload, Mapping):
+            conversation = payload.get("conversation", payload)
+            if isinstance(conversation, Mapping):
+                transaction = conversation.get("transaction")
+                if isinstance(transaction, Mapping):
+                    return transaction
+                return conversation
+            return payload
+        return {}
+
+    # ------------------------------------------------------------------ #
+    # Achat (checkout — couche paiement protégée DataDome/Incognia)
+    # ------------------------------------------------------------------ #
+
+    def get_credit_cards(self) -> dict[str, Any]:
+        """Cartes enregistrées (``GET /payments/credit_cards``)."""
+        payload = self._get("/api/v2/payments/credit_cards", require_auth=True)
+        return payload if isinstance(payload, Mapping) else {}
+
+    def build_checkout(
+        self,
+        purchase_item_id: int | str,
+        purchase_type: str = "item",
+    ) -> dict[str, Any]:
+        """
+        Prépare le checkout (``POST /purchases/checkout/build``) — gratuit,
+        ne débite rien. ``purchase_item_id`` = transaction ou item selon
+        ``purchase_type`` (``"item"`` / ``"transaction"`` / ``"offer_request"``).
+        Protégé par DataDome/Incognia : peut répondre 403 sans navigateur.
+        """
+        payload = self._post(
+            "/api/v2/purchases/checkout/build",
+            json_body={
+                "purchase_items": [{"id": int(purchase_item_id), "type": purchase_type}],
+            },
+            require_auth=True,
+        )
+        return payload if isinstance(payload, Mapping) else {}
+
+    def get_checkout(self, checkout_id: int | str) -> dict[str, Any]:
+        """État du checkout (``GET /purchases/{id}/checkout``)."""
+        payload = self._get(f"/api/v2/purchases/{checkout_id}/checkout", require_auth=True)
+        return payload if isinstance(payload, Mapping) else {}
+
+    def update_checkout(
+        self,
+        checkout_id: int | str,
+        components: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """
+        Met à jour les composants du checkout
+        (``PUT /purchases/{id}/checkout``) : adresse de livraison, transport,
+        assurance… Ex. : ``{"components": {"additional_service":
+        {"is_selected": false}}}`` pour désactiver l'assurance.
+        """
+        payload = self._request(
+            "PUT",
+            f"/api/v2/purchases/{checkout_id}/checkout",
+            json_body={"components": dict(components or {})},
+            require_auth=True,
+        )
+        return payload if isinstance(payload, Mapping) else {}
+
+    def get_checkout_payment(self, checkout_id: int | str) -> dict[str, Any]:
+        """
+        État du paiement (``GET /purchases/{id}/checkout/payment``) :
+        checksum + moyens de paiement disponibles. Protégé DataDome.
+        """
+        payload = self._get(
+            f"/api/v2/purchases/{checkout_id}/checkout/payment", require_auth=True
+        )
+        return payload if isinstance(payload, Mapping) else {}
+
+    def pay_checkout(
+        self,
+        checkout_id: int | str,
+        *,
+        checksum: str,
+        card_id: int | str,
+        security_code: str | None = None,
+        payment_options: Mapping[str, Any] | None = None,
+        confirm: bool = False,
+    ) -> dict[str, Any]:
+        """
+        Déclenche le paiement (``POST /purchases/{id}/checkout/payment``) —
+        💶 DÉBITE RÉELLEMENT la carte. Garde-fou : ``confirm=True`` requis,
+        sinon ``RuntimeError``. À n'utiliser qu'en phase de test assumée.
+        """
+        if not confirm:
+            raise RuntimeError(
+                "pay_checkout débite réellement la carte : passer "
+                "confirm=True pour confirmer (aucune requête envoyée)."
+            )
+        body: dict[str, Any] = {
+            "checksum": checksum,
+            "payment_options": dict(payment_options or {"card_id": int(card_id)}),
+        }
+        if security_code:
+            body["card_details"] = {"security_code": security_code}
+        payload = self._post(
+            f"/api/v2/purchases/{checkout_id}/checkout/payment",
+            json_body=body,
+            require_auth=True,
+        )
+        return payload if isinstance(payload, Mapping) else {}
+
+    def continue_checkout_payment(
+        self,
+        checkout_id: int | str,
+        *,
+        cvv: str | None = None,
+        checksum: str | None = None,
+        blik_code: str | None = None,
+        secure_3ds_details: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """
+        Poursuit un paiement (``POST /purchases/{id}/checkout/payment/continue``) :
+         CVV, code BLIK ou résultat 3DS renvoyé par ``pay_checkout``.
+        """
+        body: dict[str, Any] = {}
+        if cvv:
+            body["cvv"] = cvv
+        if checksum:
+            body["checksum"] = checksum
+        if blik_code:
+            body["blik_code"] = blik_code
+        if secure_3ds_details:
+            body["secure_3ds_details"] = dict(secure_3ds_details)
+        payload = self._post(
+            f"/api/v2/purchases/{checkout_id}/checkout/payment/continue",
+            json_body=body,
+            require_auth=True,
+        )
+        return payload if isinstance(payload, Mapping) else {}
 
     # ------------------------------------------------------------------ #
     # Médias
