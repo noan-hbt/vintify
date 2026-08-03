@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import random
 import re
 import time
@@ -37,7 +38,7 @@ from dataclasses import dataclass, field, asdict
 from enum import Enum
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Mapping, MutableMapping, Sequence
-from urllib.parse import parse_qsl, urlparse
+from urllib.parse import parse_qsl, quote, urlparse
 
 import cloudscraper
 
@@ -485,6 +486,13 @@ class VintedScraper:
         chaque ``refresh_token()`` — évite de recopier les cookies à
         chaque expiration du JWT (~2 h). Fichier sensible : ne pas
         committer. Le ``refresh_token_web`` expire ~7 jours.
+    hypersolutions_api_key :
+        Clé API Hyper Solutions (https://docs.hypersolutions.co) pour
+        résoudre les challenges DataDome (endpoints de paiement :
+        ``/purchases/checkout/build``, ``checkout/payment``…). Sans elle,
+        ces endpoints restent bloqués (403) hors navigateur réel.
+        Fallback : variable d'environnement ``HYPERSOLUTIONS_API_KEY``.
+        Nécessite le paquet ``curl_cffi`` (TLS imitant Chrome).
     timeout, retries :
         Comportement réseau ; ``retries`` s'applique aux 429/5xx et erreurs
         transport.
@@ -503,6 +511,7 @@ class VintedScraper:
         cookie_header: str | None = None,
         access_token: str | None = None,
         cookie_file: str | Path | None = None,
+        hypersolutions_api_key: str | None = None,
         timeout: int = DEFAULT_TIMEOUT,
         retries: int = DEFAULT_RETRIES,
         verbose: bool = False,
@@ -531,14 +540,31 @@ class VintedScraper:
         self._cookie_header = cookie_header
         self._access_token = access_token
         self.cookie_file = Path(cookie_file) if cookie_file else None
-        if (not self._cookie_header and not self.session_cookie
-                and self.cookie_file and self.cookie_file.exists()):
+        self.hypersolutions_api_key = (
+            hypersolutions_api_key or os.environ.get("HYPERSOLUTIONS_API_KEY")
+        )
+        self._dd_client: Any = None
+        self._browser_datadome: str | None = None
+        if (
+            not self._cookie_header
+            and not self.session_cookie
+            and self.cookie_file
+            and self.cookie_file.exists()
+        ):
             loaded = self._load_cookie_file(self.cookie_file)
             if loaded:
                 self._cookie_header = "; ".join(
                     f"{name}={value}" for name, value in loaded.items()
                 )
                 log.debug("Session chargée depuis %s.", self.cookie_file)
+        # cookie datadome du NAVIGATEUR (s'il a été fourni) : requis par le
+        # gateway api.vinted.fr, qui refuse le cookie résolu par le solver
+        if self._cookie_header:
+            for part in self._cookie_header.split(";"):
+                key, sep, value = part.strip().partition("=")
+                if sep and key == "datadome" and value:
+                    self._browser_datadome = value
+                    break
 
         self._last_request_ts = 0.0
         self._initializers_cache: dict[str, Any] | None = None
@@ -613,6 +639,8 @@ class VintedScraper:
             "Sec-CH-UA-Mobile": "?0",
             "Sec-CH-UA-Platform": '"Windows"',
             "X-Requested-With": "XMLHttpRequest",
+            "Platform": "web",
+            "Locale": self.locale,
         }
 
     def _install_session_cookie(self, value: str) -> None:
@@ -652,6 +680,19 @@ class VintedScraper:
         else:
             self.session.headers.pop("Authorization", None)
 
+    @staticmethod
+    def _jwt_claims(token: str) -> dict[str, Any] | None:
+        """Décode (sans vérifier) les claims d'un JWT — inspecter sub/sid/exp."""
+        try:
+            import base64 as _b64
+
+            payload = token.split(".")[1]
+            payload += "=" * (-len(payload) % 4)
+            claims = json.loads(_b64.urlsafe_b64decode(payload))
+            return claims if isinstance(claims, dict) else None
+        except Exception:
+            return None
+
     def refresh_token(self) -> dict[str, Any] | None:
         """
         Rafraîchit les JWT via ``POST /web/api/auth/refresh``
@@ -666,6 +707,9 @@ class VintedScraper:
         refresh = self._cookie_value(self.session.cookies, "refresh_token_web")
         if not refresh:
             return None
+        old_session = self._cookie_value(
+            self.session.cookies, self.session_cookie_name
+        )
         self._throttle()
         try:
             response = self.session.post(
@@ -687,6 +731,16 @@ class VintedScraper:
         )
         if not access:
             return None
+        # Garde-fou : un refresh qui renvoie des tokens SANS sub (utilisateur)
+        # signifie une session anonyme créée par le serveur (refresh token
+        # périmé/incohérent). On refuse d'adopter ces tokens.
+        access_claims = self._jwt_claims(access)
+        if not access_claims or not access_claims.get("sub"):
+            log.warning(
+                "Refresh renvoyé un access_token anonyme (sub absent) — refusé, "
+                "session non remplacée."
+            )
+            return None
 
         # remplace l'access_token_web dans le jar
         self._clear_cookie(self.session.cookies, "access_token_web")
@@ -699,11 +753,35 @@ class VintedScraper:
             if cookie.name == "refresh_token_web" and cookie.value != refresh:
                 new_refresh = cookie.value
         if new_refresh:
+            new_claims = self._jwt_claims(new_refresh)
+            if not new_claims or not new_claims.get("sub"):
+                log.warning("refresh_token_web renvoyé anonyme — non adopté.")
+                new_refresh = None
+        if new_refresh:
             self._clear_cookie(self.session.cookies, "refresh_token_web")
             self.session.cookies.set(
                 "refresh_token_web", new_refresh,
                 domain=f".vinted.{self.domain}", path="/",
             )
+        # Le refresh peut ROTER la session : il pose alors un NOUVEAU
+        # _vinted_fr_session (Set-Cookie) — c'est la seule session cohérente
+        # avec les nouveaux JWT. On l'adopte (purge des anciens). Sans
+        # rotation, on ré-affirme la session fournie par l'utilisateur.
+        new_session: str | None = None
+        for cookie in self.session.cookies:
+            if cookie.name == self.session_cookie_name and cookie.value != old_session:
+                new_session = cookie.value
+        if new_session:
+            self._clear_cookie(self.session.cookies, self.session_cookie_name)
+            self.session.cookies.set(
+                self.session_cookie_name, new_session,
+                domain=f".vinted.{self.domain}", path="/",
+            )
+        else:
+            if self._cookie_header:
+                self._install_cookies(self._cookie_header)
+            elif self.session_cookie:
+                self._install_session_cookie(self.session_cookie)
         self._sync_auth_headers()
         if self.cookie_file:
             self._save_cookie_file()
@@ -713,8 +791,38 @@ class VintedScraper:
     def _save_cookie_file(self) -> None:
         """Persiste les cookies essentiels (session + JWT) en JSON clair."""
         names = (self.session_cookie_name, "access_token_web", "refresh_token_web", "anon_id")
-        data = {name: value for name in names
-                if (value := self._cookie_value(self.session.cookies, name))}
+        data: dict[str, str] = {}
+        for name in names:
+            # préfère le cookie du domaine attendu (le serveur peut poser des
+            # doublons sur .www.vinted.fr qui écraseraient la vraie valeur)
+            value = next(
+                (
+                    c.value
+                    for c in self.session.cookies
+                    if c.name == name
+                    and c.value
+                    and c.domain == f".vinted.{self.domain}"
+                ),
+                None,
+            )
+            if value is None:
+                value = self._cookie_value(self.session.cookies, name)
+            if value:
+                data[name] = value
+        # la session fournie par l'utilisateur prime sur le jar (un refresh
+        # peut avoir posé un _vinted_fr_session anonyme par-dessus)
+        if self.session_cookie:
+            data[self.session_cookie_name] = self.session_cookie
+        elif self._cookie_header:
+            for part in self._cookie_header.split(";"):
+                key, sep, value = part.strip().partition("=")
+                if sep and key == self.session_cookie_name and value:
+                    data[key] = value
+                    break
+        # le datadome du navigateur est requis par le gateway api.vinted.fr :
+        # on le persiste (la valeur du jar peut être le cookie résolu)
+        if self._browser_datadome:
+            data["datadome"] = self._browser_datadome
         try:
             self.cookie_file.write_text(
                 json.dumps(data, indent=2), encoding="utf-8"
@@ -834,6 +942,285 @@ class VintedScraper:
         delay = min(BASE_DELAY * (2 ** attempt), MAX_DELAY)
         return delay * random.uniform(0.85, 1.25)  # jitter
 
+    # -- résolution DataDome (Hyper Solutions) ---------------------------- #
+
+    def _dd_session(self) -> Any:
+        """Client TLS imitant Chrome (curl_cffi) pour les endpoints DataDome."""
+        if self._dd_client is None:
+            try:
+                from curl_cffi import requests as cffi_requests
+            except ImportError as exc:
+                raise VintedError(
+                    "curl_cffi requis pour la résolution DataDome "
+                    "(pip install curl_cffi)"
+                ) from exc
+            self._dd_client = cffi_requests.Session(impersonate="chrome")
+            self._dd_client.headers.update(self._default_headers())
+        return self._dd_client
+
+    def _sync_dd_state(self) -> None:
+        """Copie cookies + headers de session vers le client curl_cffi."""
+        client = self._dd_session()
+        client.cookies.clear()
+        for cookie in self.session.cookies:
+            client.cookies.set(
+                cookie.name, cookie.value, domain=cookie.domain, path=cookie.path
+            )
+        for name, value in self.session.headers.items():
+            if name.lower() not in ("host", "content-length", "content-type"):
+                client.headers[name] = value
+
+    @staticmethod
+    def _public_ip() -> str:
+        """IP publique de la machine (celle qui appelle Vinted)."""
+        import requests as _requests
+
+        for url in ("https://api.ipify.org", "https://ifconfig.me/ip"):
+            try:
+                resp = _requests.get(url, timeout=10)
+                ip = resp.text.strip()
+                if resp.status_code == 200 and ip and not ip.lower().startswith("<"):
+                    return ip
+            except Exception:
+                continue
+        return ""
+
+    def _dd_install_cookie(self, client: Any, cookie_line: str) -> bool:
+        """Parse ``"datadome=...; Max-Age=...; ..."`` et pose le cookie
+        dans le jar de session (cloudscraper), puis re-synchronise le
+        client curl_cffi depuis ce jar (source de vérité)."""
+        name, _, value = cookie_line.split(";", 1)[0].partition("=")
+        if not name or not value:
+            return False
+        domain = f".vinted.{self.domain}"
+        self._clear_cookie(self.session.cookies, name)
+        self.session.cookies.set(name, value, domain=domain, path="/")
+        client.cookies.clear()
+        for cookie in self.session.cookies:
+            client.cookies.set(
+                cookie.name, cookie.value, domain=cookie.domain, path=cookie.path
+            )
+        return True
+
+    @staticmethod
+    def _parse_dd_block(html: str) -> dict[str, str]:
+        """Extrait les champs du ``var dd={...}`` d'un block page DataDome."""
+        match = re.search(r"var dd=\{(.*?)\}", html, re.S)
+        if not match:
+            return {}
+        body = match.group(1)
+
+        def field(name: str) -> str:
+            mm = re.search(rf"'{name}'\s*:\s*'?([^'}}]*)'?", body)
+            return mm.group(1).strip() if mm else ""
+
+        return {n: field(n) for n in ("rt", "cid", "hsh", "t", "s", "e")}
+
+    def _dd_device_link_from_block(
+        self, html: str, response: Any, referer: str
+    ) -> str | None:
+        """
+        Construit le deviceLink DataDome depuis un block page HTML (403).
+        Le paramètre ``cid`` du lien est la valeur du cookie ``datadome``
+        posé par la réponse bloquée (Set-Cookie).
+        """
+        fields = self._parse_dd_block(html)
+        if not fields.get("cid") or not fields.get("rt"):
+            return None
+        if fields.get("t") == "bv":
+            log.warning("DataDome : IP bloquée (t=bv) — résolution inutile.")
+            return None
+        set_cookie = response.headers.get("Set-Cookie", "")
+        dd_cookie = ""
+        for part in set_cookie.split(";"):
+            name, _, value = part.strip().partition("=")
+            if name == "datadome":
+                dd_cookie = value
+        if not dd_cookie:
+            dd_cookie = (
+                self._cookie_value(self._dd_session().cookies, "datadome") or ""
+            )
+        if not dd_cookie:
+            log.warning("Cookie datadome absent de la réponse 403.")
+            return None
+        path = "interstitial" if fields["rt"] == "i" else "captcha"
+        return (
+            f"https://geo.captcha-delivery.com/{path}/?initialCid={fields['cid']}"
+            f"&hash={fields['hsh']}&cid={dd_cookie}&t={fields['t']}"
+            f"&referer={quote(referer, safe='')}&s={fields['s']}"
+            f"&e={fields['e']}&dm=cd"
+        )
+
+    def _solve_datadome(self, device_link: str, parent_url: str | None = None) -> bool:
+        """
+        Résout un challenge DataDome (interstitial ou slider) via Hyper
+        Solutions et pose le cookie ``datadome`` dans le jar de session.
+        Route selon le chemin du device link (``/interstitial/`` vs
+        ``/captcha/``). Renvoie ``True`` si le cookie est en place.
+        """
+        if not self.hypersolutions_api_key:
+            log.warning("Challenge DataDome sans clé HyperSolutions configurée.")
+            return False
+        if "/interstitial/" in device_link:
+            return self._solve_dd_interstitial(device_link)
+        if "/captcha/" in device_link:
+            return self._solve_dd_slider(device_link, parent_url)
+        log.warning("Challenge DataDome non reconnu : %s", device_link[:120])
+        return False
+
+    def _solve_dd_interstitial(self, device_link: str) -> bool:
+        """Flow interstitial : POST du payload sur ``geo.captcha-delivery.com``."""
+        client = self._dd_session()
+        self._sync_dd_state()
+        ip = self._public_ip()
+        if not ip:
+            log.warning("IP publique introuvable — résolution DataDome annulée.")
+            return False
+        try:
+            page = client.get(device_link, timeout=self.timeout)
+            if not page.text:
+                log.warning("deviceLink vide (HTTP %s).", page.status_code)
+                return False
+
+            payload_resp = client.post(
+                "https://datadome.hypersolutions.co/interstitial",
+                headers={"x-api-key": self.hypersolutions_api_key},
+                json={
+                    "userAgent": self.user_agent,
+                    "deviceLink": device_link,
+                    "html": page.text,
+                    "ip": ip,
+                    "acceptLanguage": self.session.headers.get(
+                        "Accept-Language", f"{self.locale},en;q=0.8"
+                    ),
+                },
+                timeout=self.timeout,
+            )
+            if payload_resp.status_code != 200:
+                log.warning(
+                    "HyperSolutions interstitial → HTTP %s : %s",
+                    payload_resp.status_code,
+                    payload_resp.text[:200],
+                )
+                return False
+            data = payload_resp.json()
+            payload = (data or {}).get("payload") if isinstance(data, dict) else None
+            if not payload:
+                log.warning("Payload HyperSolutions vide.")
+                return False
+
+            headers = {"Content-Type": "application/x-www-form-urlencoded"}
+            extra = data.get("headers") if isinstance(data, dict) else None
+            if isinstance(extra, dict):
+                headers.update(extra)
+            check = client.post(
+                "https://geo.captcha-delivery.com/interstitial/",
+                data=payload,
+                headers=headers,
+                timeout=self.timeout,
+            )
+            result: Any = {}
+            try:
+                result = check.json()
+            except Exception:
+                result = {}
+            if not isinstance(result, dict):
+                result = {}
+            if result.get("view") == "captcha":
+                log.warning("DataDome demande un slider captcha — non géré.")
+                return False
+            cookie_line = result.get("cookie")
+            if not cookie_line:
+                log.warning("Pas de cookie dans la réponse DataDome : %s", check.text[:200])
+                return False
+            if not self._dd_install_cookie(client, cookie_line):
+                return False
+            log.info("Challenge DataDome interstitial résolu : cookie %s posé.",
+                     cookie_line.split(";", 1)[0].partition("=")[0])
+            return True
+        except Exception as exc:  # réseau / JSON inattendu
+            log.warning("Échec de la résolution DataDome : %s", exc)
+            return False
+
+    def _solve_dd_slider(self, device_link: str, parent_url: str | None) -> bool:
+        """Flow slider : puzzle + piece extraits du deviceLink, check URL."""
+        client = self._dd_session()
+        self._sync_dd_state()
+        ip = self._public_ip()
+        if not ip:
+            log.warning("IP publique introuvable — résolution DataDome annulée.")
+            return False
+        try:
+            client.headers["Referer"] = parent_url or self.base_url
+            page = client.get(device_link, timeout=self.timeout)
+            html = page.text or ""
+            if not html:
+                log.warning("deviceLink vide (HTTP %s).", page.status_code)
+                return False
+            match = re.search(r"captchaChallengePath:\s*['\"]([^'\"]+\.jpg)['\"]", html)
+            if not match:
+                log.warning("captchaChallengePath introuvable dans le deviceLink.")
+                return False
+            puzzle_url = match.group(1)
+            piece_url = puzzle_url[:-4] + ".frag.png"
+            client.headers["Referer"] = device_link
+            puzzle = client.get(puzzle_url, timeout=self.timeout)
+            piece = client.get(piece_url, timeout=self.timeout)
+            import base64
+
+            puzzle_b64 = base64.b64encode(puzzle.content).decode()
+            piece_b64 = base64.b64encode(piece.content).decode()
+
+            resp = client.post(
+                "https://datadome.hypersolutions.co/slider",
+                headers={"x-api-key": self.hypersolutions_api_key},
+                json={
+                    "userAgent": self.user_agent,
+                    "deviceLink": device_link,
+                    "html": html,
+                    "puzzle": puzzle_b64,
+                    "piece": piece_b64,
+                    "parentUrl": parent_url or device_link,
+                    "ip": ip,
+                    "acceptLanguage": self.session.headers.get(
+                        "Accept-Language", f"{self.locale},en;q=0.8"
+                    ),
+                },
+                timeout=self.timeout,
+            )
+            if resp.status_code != 200:
+                log.warning(
+                    "HyperSolutions slider → HTTP %s : %s",
+                    resp.status_code,
+                    resp.text[:200],
+                )
+                return False
+            data = resp.json()
+            check_url = (data or {}).get("payload") if isinstance(data, dict) else None
+            if not check_url:
+                log.warning("Check URL slider vide.")
+                return False
+            check = client.get(check_url, timeout=self.timeout)
+            result: Any = {}
+            try:
+                result = check.json()
+            except Exception:
+                result = {}
+            if not isinstance(result, dict):
+                result = {}
+            cookie_line = result.get("cookie")
+            if not cookie_line:
+                log.warning("Pas de cookie dans la réponse slider : %s", check.text[:200])
+                return False
+            if not self._dd_install_cookie(client, cookie_line):
+                return False
+            log.info("Challenge DataDome slider résolu : cookie %s posé.",
+                     cookie_line.split(";", 1)[0].partition("=")[0])
+            return True
+        except Exception as exc:  # réseau / JSON inattendu
+            log.warning("Échec de la résolution DataDome : %s", exc)
+            return False
+
     def _request(
         self,
         method: str,
@@ -843,6 +1230,8 @@ class VintedScraper:
         json_body: Mapping[str, Any] | None = None,
         retries: int | None = None,
         require_auth: bool = False,
+        datadome: bool = False,
+        browser_datadome: bool = False,
     ) -> Any:
         """
         Requête JSON (GET/POST) avec retry exponentiel.
@@ -850,6 +1239,12 @@ class VintedScraper:
         Erreurs traduites : 429 → ``VintedRateLimitError``,
         401/403 → ``VintedAuthError`` (après tentative de refresh CSRF),
         404 → ``VintedNotFoundError``, reste → ``VintedError``.
+
+        ``datadome=True`` route la requête via le client TLS Chrome
+        (curl_cffi) — requis pour les endpoints protégés par DataDome
+        (``/purchases/…``). Si un challenge interstitial est renvoyé
+        (403 + body JSON ``{"url": "...captcha-delivery.com/..."}``), il est
+        résolu via Hyper Solutions puis retenté une seule fois.
         """
         if require_auth and not self.is_authenticated:
             raise VintedAuthError(
@@ -861,6 +1256,7 @@ class VintedScraper:
         url = self._url(path)
         query = _clean_params(params)
         refreshed = False
+        dd_attempts = 0
         last_error: VintedError | None = None
 
         for attempt in range(attempts + 1):
@@ -870,9 +1266,30 @@ class VintedScraper:
                 method, url, query, json_body, attempt + 1, attempts + 1,
             )
             try:
-                response = self.session.request(
-                    method, url, params=query, json=json_body, timeout=self.timeout
-                )
+                if datadome or dd_attempts:
+                    self._sync_dd_state()
+                    if browser_datadome and self._browser_datadome:
+                        # gateway api.vinted.fr : seul le cookie datadome du
+                        # navigateur est accepté (le résolu est refusé) ; le
+                        # Referer doit être une page de checkout ; et le
+                        # header Authorization (Bearer) y est REFUSÉ (403
+                        # access_denied) — le gateway s'authentifie par
+                        # cookies uniquement
+                        self._dd_session().cookies.set(
+                            "datadome", self._browser_datadome,
+                            domain=f".vinted.{self.domain}", path="/",
+                        )
+                        self._dd_session().headers["Referer"] = (
+                            f"{self.base_url}/checkout/"
+                        )
+                        self._dd_session().headers.pop("Authorization", None)
+                    response = self._dd_session().request(
+                        method, url, params=query, json=json_body, timeout=self.timeout
+                    )
+                else:
+                    response = self.session.request(
+                        method, url, params=query, json=json_body, timeout=self.timeout
+                    )
             except Exception as exc:
                 last_error = VintedError(f"Erreur transport : {exc}", url=url)
                 if attempt >= attempts:
@@ -886,6 +1303,42 @@ class VintedScraper:
 
             if status in (200, 201):
                 return self._parse_json(response)
+
+            # Challenge DataDome inline : 403 + JSON {"url": "...captcha-delivery.com/..."}
+            # ou block page HTML (``var dd={...}`` + ct.captcha-delivery.com).
+            # (jusqu'à 2 résolutions : DataDome re-challenge parfois une 2e fois)
+            dd_device_link: str | None = None
+            if status == 403:
+                text = response.text or ""
+                try:
+                    body = response.json()
+                    if (
+                        isinstance(body, dict)
+                        and isinstance(body.get("url"), str)
+                        and "captcha-delivery.com" in body["url"]
+                    ):
+                        dd_device_link = body["url"]
+                except Exception:
+                    body = None
+                if (
+                    dd_device_link is None
+                    and "var dd={" in text
+                    and "captcha-delivery.com" in text
+                ):
+                    dd_device_link = self._dd_device_link_from_block(text, response, url)
+            if dd_device_link and dd_attempts < 2 and attempt < attempts:
+                dd_attempts += 1
+                log.info("403 DataDome sur %s → résolution du challenge…", path)
+                if self._solve_datadome(dd_device_link, url):
+                    time.sleep(self._backoff(attempt))
+                    continue
+                raise VintedAuthError(
+                    "Bloqué par DataDome : résolution impossible "
+                    "(clé HyperSolutions invalide, IP bloquée ou slider captcha).",
+                    status=status,
+                    url=url,
+                    body=response.text[:300],
+                )
 
             if status == 429:
                 retry_after = response.headers.get("Retry-After")
@@ -956,10 +1409,16 @@ class VintedScraper:
         *,
         retries: int | None = None,
         require_auth: bool = False,
+        datadome: bool = False,
     ) -> Any:
         """GET JSON — mêmes règles d'erreur que ``_request``."""
         return self._request(
-            "GET", path, params=params, retries=retries, require_auth=require_auth
+            "GET",
+            path,
+            params=params,
+            retries=retries,
+            require_auth=require_auth,
+            datadome=datadome,
         )
 
     def _post(
@@ -969,10 +1428,16 @@ class VintedScraper:
         json_body: Mapping[str, Any] | None = None,
         retries: int | None = None,
         require_auth: bool = False,
+        datadome: bool = False,
     ) -> Any:
         """POST JSON — mêmes règles d'erreur que ``_request``."""
         return self._request(
-            "POST", path, json_body=json_body, retries=retries, require_auth=require_auth
+            "POST",
+            path,
+            json_body=json_body,
+            retries=retries,
+            require_auth=require_auth,
+            datadome=datadome,
         )
 
     @staticmethod
@@ -1554,10 +2019,15 @@ class VintedScraper:
     # Achat (checkout — couche paiement protégée DataDome/Incognia)
     # ------------------------------------------------------------------ #
 
-    def get_credit_cards(self) -> dict[str, Any]:
+    def get_credit_cards(self) -> list[dict[str, Any]]:
         """Cartes enregistrées (``GET /payments/credit_cards``)."""
         payload = self._get("/api/v2/payments/credit_cards", require_auth=True)
-        return payload if isinstance(payload, Mapping) else {}
+        if isinstance(payload, Mapping):
+            for key in ("cards", "credit_cards"):
+                value = payload.get(key)
+                if isinstance(value, list):
+                    return [c for c in value if isinstance(c, dict)]
+        return []
 
     def build_checkout(
         self,
@@ -1576,12 +2046,13 @@ class VintedScraper:
                 "purchase_items": [{"id": int(purchase_item_id), "type": purchase_type}],
             },
             require_auth=True,
+            datadome=True,
         )
         return payload if isinstance(payload, Mapping) else {}
 
     def get_checkout(self, checkout_id: int | str) -> dict[str, Any]:
         """État du checkout (``GET /purchases/{id}/checkout``)."""
-        payload = self._get(f"/api/v2/purchases/{checkout_id}/checkout", require_auth=True)
+        payload = self._get(f"/api/v2/purchases/{checkout_id}/checkout", require_auth=True, datadome=True)
         return payload if isinstance(payload, Mapping) else {}
 
     def update_checkout(
@@ -1600,8 +2071,87 @@ class VintedScraper:
             f"/api/v2/purchases/{checkout_id}/checkout",
             json_body={"components": dict(components or {})},
             require_auth=True,
+            datadome=True,
         )
         return payload if isinstance(payload, Mapping) else {}
+
+    def get_nearby_pickup_points(
+        self,
+        checkout_id: int | str,
+        latitude: float,
+        longitude: float,
+        *,
+        shipping_order_id: int | str | None = None,
+        country_code: str = "FR",
+    ) -> dict[str, Any]:
+        """
+        Points relais disponibles pour un checkout
+        (``GET api.vinted.fr/shipping-estimation/external/shipping_orders/
+        {id}/nearby_pickup_points`` — passerelle API, hors ``/api/v2``).
+
+        Renvoie le dict brut : ``shipping_points`` (chaque élément contient
+        ``point`` : code, uuid, adresse…), ``shipping_rates`` (tarifs par
+        transporteur) et ``suggested_shipping_point_code``.
+
+        ``shipping_order_id`` est extrait automatiquement du checkout s'il
+        n'est pas fourni.
+        """
+        if shipping_order_id is None:
+            co = self.get_checkout(checkout_id).get("checkout", {})
+            comps = co.get("components", {})
+            shipping_order_id = (
+                comps.get("shipping_address", {}) or {}
+            ).get("shipping_order_id")
+            if shipping_order_id is None:
+                raise VintedError(
+                    "shipping_order_id introuvable dans le checkout "
+                    f"{checkout_id} — fournis-le explicitement."
+                )
+        client = self._dd_session()
+        self._sync_dd_state()
+        client.headers["Referer"] = f"{self.base_url}/checkout/"
+        url = (
+            f"https://api.vinted.{self.domain}/shipping-estimation/external/"
+            f"shipping_orders/{shipping_order_id}/nearby_pickup_points"
+        )
+        payload = self._request(
+            "GET",
+            url,
+            params={
+                "country_code": country_code,
+                "latitude": latitude,
+                "longitude": longitude,
+            },
+            require_auth=True,
+            datadome=True,
+            browser_datadome=True,
+        )
+        return payload if isinstance(payload, Mapping) else {}
+
+    def select_pickup_point(
+        self,
+        checkout_id: int | str,
+        *,
+        rate_uuid: str,
+        point_code: int | str,
+        point_uuid: str,
+    ) -> dict[str, Any]:
+        """
+        Sélectionne un point relais sur le checkout
+        (``PUT /purchases/{id}/checkout`` — composant
+        ``shipping_pickup_details`` : ``rate_uuid`` + ``point_code`` +
+        ``point_uuid``). Renvoie le checkout mis à jour.
+        """
+        return self.update_checkout(
+            checkout_id,
+            components={
+                "shipping_pickup_details": {
+                    "rate_uuid": rate_uuid,
+                    "point_code": str(point_code),
+                    "point_uuid": point_uuid,
+                }
+            },
+        )
 
     def get_checkout_payment(self, checkout_id: int | str) -> dict[str, Any]:
         """
@@ -1609,7 +2159,9 @@ class VintedScraper:
         checksum + moyens de paiement disponibles. Protégé DataDome.
         """
         payload = self._get(
-            f"/api/v2/purchases/{checkout_id}/checkout/payment", require_auth=True
+            f"/api/v2/purchases/{checkout_id}/checkout/payment",
+            require_auth=True,
+            datadome=True,
         )
         return payload if isinstance(payload, Mapping) else {}
 
@@ -1643,6 +2195,7 @@ class VintedScraper:
             f"/api/v2/purchases/{checkout_id}/checkout/payment",
             json_body=body,
             require_auth=True,
+            datadome=True,
         )
         return payload if isinstance(payload, Mapping) else {}
 
@@ -1672,6 +2225,7 @@ class VintedScraper:
             f"/api/v2/purchases/{checkout_id}/checkout/payment/continue",
             json_body=body,
             require_auth=True,
+            datadome=True,
         )
         return payload if isinstance(payload, Mapping) else {}
 
