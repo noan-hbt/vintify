@@ -1,0 +1,6 @@
+# Dépendances du bot (Railway installe ce fichier avec Nixpacks).
+# vinted_scraper.py est importé depuis la racine du dépôt (cf. bot.py).
+cloudscraper>=1.2.71
+tqdm>=4.66.0
+brotli
+discord.py>=2.4

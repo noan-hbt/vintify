@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Environnement
+.env
+
+# Données locales du bot (état des veilles — sur Railway, montées sur un volume)
+data/
+
+# OS
+.DS_Store
+Thumbs.db

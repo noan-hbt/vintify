@@ -2,6 +2,10 @@
 
 Client HTTP synchrone, typé et autonome pour interroger l’API interne non documentée de Vinted.
 
+> Le dépôt contient aussi un **bot Discord complet** (alertes de nouvelles
+> annonces, baisses de prix, suivi d'articles) déployable sur Railway :
+> voir [discord_bot/README.md](discord_bot/README.md).
+
 La librairie fournit une interface stable pour les scripts de monitoring, bots Discord et outils d’analyse d’annonces. Elle gère notamment le bootstrap de session, le token CSRF, les retries, le backoff, la pagination, la normalisation des données et les endpoints authentifiés.
 
 > **Avertissement**
@@ -286,6 +290,13 @@ with VintedScraper(domain="fr") as vinted:
     item = vinted.get_item(4_123_456_789)
     full_item = vinted.get_item_full(4_123_456_789)
 ```
+
+> **Repli automatique** : si l'API de détail renvoie `404` en mode anonyme
+> (comportement observé sur certains réseaux), `get_item()` extrait
+> automatiquement les données du bloc JSON-LD `Product` de la page publique
+> de l'article : titre, description, prix, devise, disponibilité
+> (`InStock`/`OutOfStock`), marque, image. Les champs absents du JSON-LD
+> (taille, vendeur, favoris) valent alors `None`.
 
 ### Articles similaires
 
@@ -789,6 +800,12 @@ from vinted_scraper import (
 - L’API Vinted n’est pas publique et peut modifier ses endpoints ou formats de réponse.
 - Certains endpoints peuvent être indisponibles selon le domaine, le compte ou l’adresse IP.
 - Les endpoints privés nécessitent un cookie de session valide.
+- En mode anonyme, l'API de détail d'article (`/api/v2/items/{id}`) peut renvoyer
+  `404` : `get_item()` retombe alors sur le JSON-LD de la page publique (voir
+  « Récupérer un article »).
+- Les endpoints de données de référence (`initializers`, `catalogs`) peuvent être
+  bloqués en mode anonyme : `get_brands()`, `get_categories()`, `get_sizes()`…
+  renverront une erreur dans ce cas.
 - La librairie est synchrone. Dans une application asynchrone comme `discord.py`, utilisez par exemple `asyncio.to_thread()` pour éviter de bloquer la boucle principale.
 - `tqdm` est nécessaire uniquement pour afficher les barres de progression.
 - Les mécanismes anti-abus peuvent limiter ou bloquer les requêtes trop fréquentes.

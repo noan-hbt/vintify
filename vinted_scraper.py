@@ -1440,6 +1440,64 @@ class VintedScraper:
             datadome=datadome,
         )
 
+    def _page(self, path: str, *, retries: int | None = None) -> str:
+        """
+        GET d'une page HTML (throttle + retries + backoff), renvoie le texte.
+
+        Utilisé par le repli de :meth:`get_item` quand l'API JSON d'un
+        article renvoie 404 (comportement observé côté anonyme) alors que
+        la page publique existe. Les erreurs sont traduites comme ``_request``
+        (429 → ``VintedRateLimitError``, 404 → ``VintedNotFoundError``).
+        """
+        attempts = self.retries if retries is None else max(0, retries)
+        url = self._url(path)
+        last_error: VintedError | None = None
+
+        for attempt in range(attempts + 1):
+            self._throttle()
+            log.debug("GET page %s (essai %d/%d)", url, attempt + 1, attempts + 1)
+            try:
+                response = self.session.get(url, timeout=self.timeout)
+            except Exception as exc:
+                last_error = VintedError(f"Erreur transport : {exc}", url=url)
+                if attempt >= attempts:
+                    break
+                time.sleep(self._backoff(attempt))
+                continue
+            finally:
+                self._last_request_ts = time.monotonic()
+
+            status = response.status_code
+            if status in (200, 201):
+                return response.text
+            if status == 429:
+                retry_after = response.headers.get("Retry-After")
+                try:
+                    delay = float(retry_after) if retry_after else self._backoff(attempt)
+                except ValueError:
+                    delay = self._backoff(attempt)
+                last_error = VintedRateLimitError(
+                    "Rate limit atteint", status=status, url=url
+                )
+                if attempt >= attempts:
+                    break
+                log.warning("429 sur %s → pause %.1fs", path, delay)
+                time.sleep(min(delay, MAX_DELAY))
+                continue
+            if status == 404:
+                raise VintedNotFoundError("Ressource introuvable", status=status, url=url)
+            if 500 <= status < 600:
+                last_error = VintedError("Erreur serveur Vinted", status=status, url=url)
+                if attempt >= attempts:
+                    break
+                time.sleep(self._backoff(attempt))
+                continue
+            raise VintedError(
+                "Réponse inattendue", status=status, url=url, body=response.text[:300]
+            )
+
+        raise last_error or VintedError("Échec de la requête", url=url)
+
     @staticmethod
     def _parse_json(response: Any) -> Any:
         content_type = (response.headers.get("Content-Type") or "").lower()
@@ -1601,10 +1659,72 @@ class VintedScraper:
         return list(self.iter_items(*args, **kwargs))
 
     def get_item(self, item_id: int | str, *, normalize: bool = False) -> dict[str, Any]:
-        """Détail d'un article (``/api/v2/items/{id}``)."""
-        payload = self._get(f"/api/v2/items/{item_id}")
+        """
+        Détail d'un article (``/api/v2/items/{id}``).
+
+        Repli automatique : si l'API renvoie 404 (comportement observé côté
+        anonyme sur certains réseaux) alors que la page publique existe, le
+        détail est extrait du JSON-LD ``Product`` de la page HTML
+        (titre, description, prix, devise, disponibilité, marque, image).
+        """
+        try:
+            payload = self._get(f"/api/v2/items/{item_id}")
+        except VintedNotFoundError:
+            if not str(item_id).isdigit():
+                raise
+            payload = self._item_from_page(int(item_id))
         item = payload.get("item", payload) if isinstance(payload, Mapping) else {}
         return normalize_item(item) if normalize else item
+
+    def _item_from_page(self, item_id: int) -> dict[str, Any]:
+        """
+        Repli ``get_item`` : extrait le bloc JSON-LD ``Product`` de la page
+        HTML publique de l'article. Lève ``VintedResponseError`` si la page
+        ne contient pas de données produit exploitables.
+        """
+        html = self._page(f"/items/{item_id}")
+        for match in re.finditer(
+            r'<script type="application/ld\+json">(.*?)</script>', html, re.S
+        ):
+            try:
+                data = json.loads(match.group(1))
+            except (ValueError, TypeError):
+                continue
+            if not isinstance(data, dict) or data.get("@type") != "Product":
+                continue
+            offers = data.get("offers") or {}
+            if isinstance(offers, list):   # schema.org autorise une liste
+                offers = offers[0] if offers else {}
+            if not isinstance(offers, dict):
+                offers = {}
+            availability = str(offers.get("availability") or "")
+            brand = data.get("brand") or {}
+            image = data.get("image")
+            raw = {
+                "id": item_id,
+                "title": data.get("name"),
+                "description": data.get("description"),
+                "brand_title": brand.get("name"),
+                "price": _price_to_float(offers.get("price")),
+                "currency": offers.get("priceCurrency"),
+                "url": offers.get("url") or self.item_url(item_id),
+                "photo": {"url": image} if isinstance(image, str) else {},
+                "photos": [],
+                "is_closed": "OutOfStock" in availability,
+                "status": None,
+                "size": None,
+                "favourite_count": None,
+                "view_count": None,
+            }
+            if data.get("category"):
+                raw["category_title"] = str(data["category"])
+            if data.get("color"):
+                raw["color_title"] = str(data["color"])
+            return raw
+        raise VintedResponseError(
+            "Aucune donnée produit (JSON-LD) dans la page de l'article.",
+            url=self.item_url(item_id),
+        )
 
     def get_item_full(self, item_id: int | str) -> dict[str, Any]:
         """
