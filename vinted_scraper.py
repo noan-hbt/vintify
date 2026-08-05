@@ -3,6 +3,8 @@ vinted_scraper
 ~~~~~~~~~~~~~~
 
 Client HTTP synchrone pour l'API interne (non documentée) de Vinted.
+Conçu pour servir de bibliothèque centrale pour des bots (Discord, Telegram)
+et des scripts d'automatisation.
 
 Points clés
 -----------
@@ -48,7 +50,9 @@ except ImportError:  # pragma: no cover
     _tqdm = None
 
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
+__author__ = "Vinted Scraper Contributors"
+__license__ = "MIT"
 
 __all__ = [
     "VintedScraper",
@@ -285,12 +289,24 @@ def _extract_list(payload: Any, key: str | None = None) -> list[dict[str, Any]]:
 
 
 def normalize_item(raw: Mapping[str, Any]) -> dict[str, Any]:
-    """Aplatit une annonce en dictionnaire stable, pratique pour un embed Discord."""
+    """
+    Aplatit une annonce en dictionnaire stable, pratique pour un embed Discord.
+    Tolérant aux glitchs de l'API (ex: brand/user renvoyés en string).
+    """
     photo = raw.get("photo") or {}
     photos = raw.get("photos") or []
     if not photo and photos:
         photo = photos[0] or {}
-    user = raw.get("user") or {}
+    
+    # Sécurisation user/brand (peuvent être des strings ou None selon les endpoints)
+    user_data = raw.get("user") or {}
+    user = user_data if isinstance(user_data, dict) else {}
+    
+    brand_data = raw.get("brand")
+    brand_title = raw.get("brand_title")
+    if not brand_title and isinstance(brand_data, dict):
+        brand_title = brand_data.get("title")
+
     price = raw.get("price")
     total = raw.get("total_item_price") or raw.get("service_fee")
 
@@ -298,7 +314,7 @@ def normalize_item(raw: Mapping[str, Any]) -> dict[str, Any]:
         "id": raw.get("id"),
         "title": raw.get("title"),
         "description": raw.get("description"),
-        "brand": raw.get("brand_title") or (raw.get("brand") or {}).get("title"),
+        "brand": brand_title,
         "brand_id": raw.get("brand_id"),
         "size": raw.get("size_title") or raw.get("size"),
         "status": raw.get("status"),
@@ -306,7 +322,7 @@ def normalize_item(raw: Mapping[str, Any]) -> dict[str, Any]:
         "total_price": _price_to_float(total),
         "currency": _currency_of(price, raw.get("currency")),
         "url": raw.get("url"),
-        "photo": photo.get("full_size_url") or photo.get("url"),
+        "photo": photo.get("full_size_url") or photo.get("url") if isinstance(photo, dict) else None,
         "photo_count": len(photos) or (1 if photo else 0),
         "favourites": raw.get("favourite_count"),
         "views": raw.get("view_count"),
@@ -323,6 +339,15 @@ def normalize_item(raw: Mapping[str, Any]) -> dict[str, Any]:
 def normalize_user(raw: Mapping[str, Any]) -> dict[str, Any]:
     """Version à plat d'un profil vendeur (cf. ``get_user_stats``)."""
     photo = raw.get("photo") or {}
+    
+    # Sécurisation de la structure de vérification
+    verification = raw.get("verification") or {}
+    email_valid = False
+    if isinstance(verification, dict):
+        email_info = verification.get("email")
+        if isinstance(email_info, dict):
+            email_valid = bool(email_info.get("valid"))
+
     return {
         "id": raw.get("id"),
         "login": raw.get("login"),
@@ -341,9 +366,9 @@ def normalize_user(raw: Mapping[str, Any]) -> dict[str, Any]:
         "neutral_feedback": raw.get("neutral_feedback_count"),
         "feedback_count": raw.get("feedback_count"),
         "feedback_reputation": raw.get("feedback_reputation"),
-        "is_verified": bool((raw.get("verification") or {}).get("email", {}).get("valid")),
+        "is_verified": email_valid,
         "is_business": bool(raw.get("business")),
-        "avatar": photo.get("full_size_url") or photo.get("url"),
+        "avatar": photo.get("full_size_url") or photo.get("url") if isinstance(photo, dict) else None,
         "profile_url": raw.get("profile_url"),
     }
 
@@ -545,6 +570,10 @@ class VintedScraper:
         )
         self._dd_client: Any = None
         self._browser_datadome: str | None = None
+        
+        # Cache interne pour optimiser les recherches (ex: find_brand)
+        self._brands_cache: list[dict[str, Any]] | None = None
+
         if (
             not self._cookie_header
             and not self.session_cookie
@@ -613,7 +642,7 @@ class VintedScraper:
             pass
 
     def __repr__(self) -> str:  # pragma: no cover - cosmétique
-        auth = "auth" if self.session_cookie else "anon"
+        auth = "auth" if self.is_authenticated else "anon"
         return f"<VintedScraper domain={self.domain!r} {auth} csrf={bool(self.csrf_token)}>"
 
     # -- session / anti-bot ------------------------------------------------ #
@@ -973,7 +1002,10 @@ class VintedScraper:
     @staticmethod
     def _public_ip() -> str:
         """IP publique de la machine (celle qui appelle Vinted)."""
-        import requests as _requests
+        try:
+            import requests as _requests
+        except ImportError:
+            return ""
 
         for url in ("https://api.ipify.org", "https://ifconfig.me/ip"):
             try:
@@ -1011,7 +1043,8 @@ class VintedScraper:
         body = match.group(1)
 
         def field(name: str) -> str:
-            mm = re.search(rf"'{name}'\s*:\s*'?([^'}}]*)'?", body)
+            # Regex robuste : gère les guillemets simples, doubles, ou l'absence de guillemets
+            mm = re.search(rf"['\"]?{name}['\"]?\s*:\s*['\"]?([^,'\"}}\s]+)['\"]?", body)
             return mm.group(1).strip() if mm else ""
 
         return {n: field(n) for n in ("rt", "cid", "hsh", "t", "s", "e")}
@@ -1030,12 +1063,18 @@ class VintedScraper:
         if fields.get("t") == "bv":
             log.warning("DataDome : IP bloquée (t=bv) — résolution inutile.")
             return None
-        set_cookie = response.headers.get("Set-Cookie", "")
-        dd_cookie = ""
-        for part in set_cookie.split(";"):
-            name, _, value = part.strip().partition("=")
-            if name == "datadome":
-                dd_cookie = value
+            
+        # Utilisation du Cookie Jar de requests (plus fiable que le header brut)
+        dd_cookie = response.cookies.get("datadome") or ""
+        if not dd_cookie:
+            # Fallback sur le header brut
+            set_cookie = response.headers.get("Set-Cookie", "")
+            for part in set_cookie.split(";"):
+                name, _, value = part.strip().partition("=")
+                if name == "datadome":
+                    dd_cookie = value
+                    break
+                    
         if not dd_cookie:
             dd_cookie = (
                 self._cookie_value(self._dd_session().cookies, "datadome") or ""
@@ -1964,7 +2003,11 @@ class VintedScraper:
         return _extract_list(self._dtos(refresh), "catalogs")
 
     def get_brands(self, *, refresh: bool = False) -> list[dict[str, Any]]:
-        return _extract_list(self._dtos(refresh), "brands")
+        if self._brands_cache is not None and not refresh:
+            return self._brands_cache
+        brands = _extract_list(self._dtos(refresh), "brands")
+        self._brands_cache = brands
+        return brands
 
     def get_sizes(self, *, refresh: bool = False) -> list[dict[str, Any]]:
         dtos = self._dtos(refresh)
@@ -1979,15 +2022,28 @@ class VintedScraper:
     def get_statuses(self, *, refresh: bool = False) -> list[dict[str, Any]]:
         return _extract_list(self._dtos(refresh), "statuses")
 
-    def find_brand(self, name: str) -> dict[str, Any] | None:
-        """Résolution nom → marque (insensible à la casse) via les initializers."""
+    def find_brand(self, name: str, *, refresh: bool = False) -> dict[str, Any] | None:
+        """
+        Résolution nom → marque (insensible à la casse) via les initializers.
+        Utilise un cache interne pour éviter de spammer l'API lors de boucles.
+        """
         needle = name.strip().casefold()
-        for brand in self.get_brands():
+        brands = self.get_brands(refresh=refresh)
+        
+        # Exact match first
+        for brand in brands:
             if str(brand.get("title", "")).casefold() == needle:
                 return brand
-        for brand in self.get_brands():
+        
+        # Partial match fallback
+        for brand in brands:
             if needle in str(brand.get("title", "")).casefold():
                 return brand
+                
+        # Retry once with refresh if not found and not already refreshed
+        if not refresh:
+            return self.find_brand(name, refresh=True)
+            
         return None
 
     # ------------------------------------------------------------------ #
@@ -2042,7 +2098,7 @@ class VintedScraper:
         return {}
 
     # ------------------------------------------------------------------ #
-    # Offres (cookie de session requis)
+    # Offres (cookie de session requis) - DISCONTINUED / UNTOUCHED
     # ------------------------------------------------------------------ #
 
     def get_offer_request_options(
@@ -2136,7 +2192,7 @@ class VintedScraper:
         return {}
 
     # ------------------------------------------------------------------ #
-    # Achat (checkout — couche paiement protégée DataDome/Incognia)
+    # Achat (checkout — couche paiement protégée DataDome/Incognia) - DISCONTINUED / UNTOUCHED
     # ------------------------------------------------------------------ #
 
     def get_credit_cards(self) -> list[dict[str, Any]]:
@@ -2330,7 +2386,7 @@ class VintedScraper:
     ) -> dict[str, Any]:
         """
         Poursuit un paiement (``POST /purchases/{id}/checkout/payment/continue``) :
-         CVV, code BLIK ou résultat 3DS renvoyé par ``pay_checkout``.
+         CVV, code BLIK ou résultat 3DS renvoyé par ``pay_checkout``.
         """
         body: dict[str, Any] = {}
         if cvv:
