@@ -1,46 +1,46 @@
 # Vinted Scraper
 
-Client HTTP synchrone, typé et autonome pour interroger l’API interne non documentée de Vinted.
+A synchronous, typed, self-contained HTTP client for Vinted's undocumented internal API.
 
-> Le dépôt contient aussi un **bot Discord complet** (alertes de nouvelles
-> annonces, baisses de prix, suivi d'articles) déployable sur Railway :
-> voir [discord_bot/README.md](discord_bot/README.md).
+> The repository also contains a **full Discord bot** (alerts for new listings, price drops,
+> item tracking) that can be deployed on Railway: see
+> [discord_bot/README.md](discord_bot/README.md).
 
-La librairie fournit une interface stable pour les scripts de monitoring, bots Discord et outils d’analyse d’annonces. Elle gère notamment le bootstrap de session, le token CSRF, les retries, le backoff, la pagination, la normalisation des données et les endpoints authentifiés.
+The library provides a stable interface for monitoring scripts, Discord bots and listing analysis tools. It handles session bootstrap, the CSRF token, retries, backoff, pagination, data normalization and authenticated endpoints.
 
-> **Avertissement**
+> **Warning**
 >
-> L’API utilisée par cette librairie est privée, non documentée et susceptible de changer sans préavis. Utilisez-la de manière responsable, respectez les conditions d’utilisation de Vinted ainsi que la législation applicable. Évitez les requêtes excessives et ne contournez pas les mécanismes de sécurité du service.
+> The API used by this library is private, undocumented and may change without notice. Use it responsibly, and respect Vinted's terms of service and applicable law. Avoid excessive requests and do not circumvent the service's security mechanisms.
 
-## Fonctionnalités
+## Features
 
-- Client HTTP synchrone basé sur [`cloudscraper`](https://github.com/VeNoMouS/cloudscraper).
-- Support de plusieurs domaines Vinted européens.
-- Bootstrap automatique de la session :
-  - récupération des cookies anonymes ;
-  - extraction du token CSRF depuis la page d’accueil ;
-  - ajout automatique de `X-CSRF-Token`.
-- Gestion centralisée des requêtes HTTP avec :
-  - limitation de fréquence ;
-  - retries ;
-  - backoff exponentiel avec jitter ;
-  - prise en charge des erreurs `429`, `401`, `403`, `404` et `5xx` ;
-  - rafraîchissement automatique du token CSRF.
-- Pagination générique avec déduplication et arrêt automatique.
-- Barre de progression optionnelle avec `tqdm`.
-- Recherche multi-critères.
-- Conversion d’une URL de recherche Vinted en `SearchFilters`.
-- Normalisation des annonces et des profils vendeurs.
-- Accès aux articles similaires et à l’historique des prix.
-- Accès aux évaluations, abonnés et abonnements d’un utilisateur.
-- Accès aux données de référence : marques, catégories, tailles, couleurs et matériaux.
-- Support optionnel des endpoints authentifiés avec un cookie de session.
-- Téléchargement des photos d’un article.
-- Utilisation possible comme context manager.
+- Synchronous HTTP client built on [`cloudscraper`](https://github.com/VeNoMouS/cloudscraper).
+- Support for many European Vinted domains.
+- Automatic session bootstrap:
+  - fetches anonymous cookies;
+  - extracts the CSRF token from the home page;
+  - adds `X-CSRF-Token` automatically.
+- Centralized HTTP request handling with:
+  - rate limiting;
+  - retries;
+  - exponential backoff with jitter;
+  - handling of `429`, `401`, `403`, `404` and `5xx` errors;
+  - automatic CSRF token refresh.
+- Generic pagination with deduplication and automatic stop.
+- Optional progress bar with `tqdm`.
+- Multi-criteria search.
+- Conversion of a Vinted search URL into `SearchFilters`.
+- Normalization of listings and seller profiles.
+- Access to similar items and price history.
+- Access to a user's feedback, followers and following.
+- Access to reference data: brands, categories, sizes, colors and materials.
+- Optional support for authenticated endpoints with a session cookie.
+- Download of an item's photos.
+- Usable as a context manager.
 
 ## Installation
 
-### Depuis les sources
+### From source
 
 ```bash
 git clone https://github.com/noan-hbt/vintify
@@ -50,22 +50,22 @@ python -m venv .venv
 source .venv/bin/activate
 ```
 
-Sous Windows :
+On Windows:
 
 ```powershell
 python -m venv .venv
 .venv\Scripts\activate
 ```
 
-Installez les dépendances :
+Install the dependencies:
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### Dépendances
+### Dependencies
 
-Le fichier `requirements.txt` contient :
+`requirements.txt` contains:
 
 ```txt
 cloudscraper>=1.2.71
@@ -73,9 +73,9 @@ tqdm>=4.66.0
 brotli
 ```
 
-`tqdm` est optionnel à l’exécution. Si le paquet n’est pas installé, les fonctionnalités de progression sont simplement désactivées.
+`tqdm` is optional at runtime. If the package is not installed, progress features are simply disabled.
 
-## Structure recommandée
+## Recommended layout
 
 ```text
 .
@@ -86,9 +86,9 @@ brotli
     └── search.py
 ```
 
-La librairie est autonome et peut être utilisée en copiant simplement `vinted_scraper.py` dans votre projet.
+The library is self-contained: you can use it by simply copying `vinted_scraper.py` into your project.
 
-## Utilisation rapide
+## Quick start
 
 ```python
 from vinted_scraper import Sort, VintedScraper
@@ -112,7 +112,7 @@ with VintedScraper(domain="fr") as vinted:
         )
 ```
 
-La méthode `search_items()` retourne une liste. Pour traiter les résultats progressivement et interrompre rapidement la pagination, utilisez `iter_items()` :
+`search_items()` returns a list. To process results as they arrive and stop paginating early, use `iter_items()`:
 
 ```python
 from vinted_scraper import VintedScraper
@@ -126,14 +126,14 @@ with VintedScraper(domain="fr") as vinted:
     ):
         print(item["title"])
 
-        # Exemple :
+        # Example:
         # if already_seen(item["id"]):
         #     break
 ```
 
-## Recherche avec des filtres
+## Searching with filters
 
-### Filtres directs
+### Direct filters
 
 ```python
 from vinted_scraper import Sort, VintedScraper
@@ -152,7 +152,7 @@ with VintedScraper(domain="fr") as vinted:
     )
 ```
 
-Les paramètres de recherche disponibles comprennent notamment :
+Available search parameters include:
 
 - `search_text`
 - `catalog_ids`
@@ -169,9 +169,9 @@ Les paramètres de recherche disponibles comprennent notamment :
 - `is_for_swap`
 - `order`
 
-Les listes d’identifiants sont automatiquement converties au format CSV attendu par l’API.
+ID lists are automatically converted to the CSV format the API expects.
 
-### Utiliser `SearchFilters`
+### Using `SearchFilters`
 
 ```python
 from vinted_scraper import SearchFilters, VintedScraper
@@ -191,7 +191,7 @@ with VintedScraper(domain="fr") as vinted:
         print(item["title"], item["price"])
 ```
 
-### Convertir une URL Vinted
+### Converting a Vinted URL
 
 ```python
 from vinted_scraper import SearchFilters, VintedScraper
@@ -203,7 +203,7 @@ filters = SearchFilters.from_url(
     "&order=newest_first"
 )
 
-# Compatible avec une sauvegarde JSON
+# Can be saved as JSON
 payload = filters.to_dict()
 print(payload)
 
@@ -215,7 +215,7 @@ with VintedScraper(domain="fr") as vinted:
     )
 ```
 
-Recharger les filtres depuis un dictionnaire :
+Reload filters from a dictionary:
 
 ```python
 import json
@@ -228,9 +228,9 @@ with open("monitor.json", encoding="utf-8") as file:
 filters = SearchFilters.from_dict(data)
 ```
 
-## Normalisation des données
+## Data normalization
 
-L’API peut retourner les prix sous plusieurs formats. Les fonctions de normalisation produisent des dictionnaires plus stables et plus simples à exploiter.
+The API can return prices in several formats. The normalization functions produce dictionaries that are more stable and easier to work with.
 
 ```python
 from vinted_scraper import VintedScraper
@@ -241,7 +241,7 @@ with VintedScraper(domain="fr") as vinted:
 print(item)
 ```
 
-Exemple de résultat normalisé :
+Example of a normalized result:
 
 ```python
 {
@@ -261,7 +261,7 @@ Exemple de résultat normalisé :
     "favourites": 12,
     "views": 180,
     "user_id": 12345678,
-    "user_login": "vendeur",
+    "user_login": "seller",
     "country": "FR",
     "created_at": "...",
     "updated_at": "...",
@@ -270,7 +270,7 @@ Exemple de résultat normalisé :
 }
 ```
 
-Il est également possible d’utiliser directement les helpers :
+You can also call the helpers directly:
 
 ```python
 from vinted_scraper import normalize_item, normalize_user
@@ -279,9 +279,9 @@ normalized_item = normalize_item(raw_item)
 normalized_user = normalize_user(raw_user)
 ```
 
-## Articles et analyse des prix
+## Items and price analysis
 
-### Récupérer un article
+### Fetching an item
 
 ```python
 from vinted_scraper import VintedScraper
@@ -291,14 +291,13 @@ with VintedScraper(domain="fr") as vinted:
     full_item = vinted.get_item_full(4_123_456_789)
 ```
 
-> **Repli automatique** : si l'API de détail renvoie `404` en mode anonyme
-> (comportement observé sur certains réseaux), `get_item()` extrait
-> automatiquement les données du bloc JSON-LD `Product` de la page publique
-> de l'article : titre, description, prix, devise, disponibilité
-> (`InStock`/`OutOfStock`), marque, image. Les champs absents du JSON-LD
-> (taille, vendeur, favoris) valent alors `None`.
+> **Automatic fallback**: if the detail API returns `404` in anonymous mode (seen on some
+> networks), `get_item()` automatically extracts the data from the `Product` JSON-LD block of
+> the item's public page: title, description, price, currency, availability
+> (`InStock`/`OutOfStock`), brand, image. Fields missing from the JSON-LD (size, seller,
+> favourites) are then `None`.
 
-### Articles similaires
+### Similar items
 
 ```python
 with VintedScraper(domain="fr") as vinted:
@@ -316,10 +315,10 @@ with VintedScraper(domain="fr") as vinted:
 
     if prices:
         median = sorted(prices)[len(prices) // 2]
-        print(f"Prix médian : {median}")
+        print(f"Median price: {median}")
 ```
 
-### Historique de prix
+### Price history
 
 ```python
 with VintedScraper(domain="fr") as vinted:
@@ -329,7 +328,7 @@ with VintedScraper(domain="fr") as vinted:
         print(change)
 ```
 
-### Construire l’URL d’un article
+### Building an item URL
 
 ```python
 with VintedScraper(domain="fr") as vinted:
@@ -337,7 +336,7 @@ with VintedScraper(domain="fr") as vinted:
     print(url)
 ```
 
-## Utilisateurs et vendeurs
+## Users and sellers
 
 ```python
 from vinted_scraper import VintedScraper
@@ -358,17 +357,17 @@ with VintedScraper(domain="fr") as vinted:
     )
 ```
 
-Autres méthodes disponibles :
+Other available methods:
 
 ```python
 vinted.get_user_followers(user_id)
 vinted.get_user_following(user_id)
-vinted.search_users("pseudo")
+vinted.search_users("username")
 ```
 
-## Marques et données de référence
+## Brands and reference data
 
-Les données de référence sont mises en cache en mémoire après le premier appel.
+Reference data is cached in memory after the first call.
 
 ```python
 from vinted_scraper import VintedScraper
@@ -385,18 +384,18 @@ with VintedScraper(domain="fr") as vinted:
     print(brand)
 ```
 
-Forcer le rafraîchissement du cache :
+Force a cache refresh:
 
 ```python
 with VintedScraper(domain="fr") as vinted:
     brands = vinted.get_brands(refresh=True)
 ```
 
-## Endpoints authentifiés
+## Authenticated endpoints
 
-Les fonctionnalités privées, comme la messagerie, nécessitent un cookie de session Vinted valide.
+Private features, such as messages, require a valid Vinted session cookie.
 
-> Ne stockez jamais votre cookie directement dans le code ou dans le dépôt Git. Utilisez une variable d’environnement ou un gestionnaire de secrets.
+> Never store your cookie in the code or in the Git repository. Use an environment variable or a secrets manager.
 
 ```python
 import os
@@ -421,79 +420,75 @@ with VintedScraper(
         )
 
     except VintedAuthError:
-        print("Cookie expiré ou accès refusé.")
+        print("Cookie expired or access denied.")
 ```
 
-Exemple de configuration de l’environnement :
+Setting up the environment:
 
 ```bash
-export VINTED_SESSION="votre_cookie_de_session"
+export VINTED_SESSION="your_session_cookie"
 ```
 
-Sous Windows PowerShell :
+In Windows PowerShell:
 
 ```powershell
-$env:VINTED_SESSION = "votre_cookie_de_session"
+$env:VINTED_SESSION = "your_session_cookie"
 ```
 
-## Achat (checkout) et bypass DataDome
+## Checkout and DataDome bypass
 
-Le flux d'achat (build checkout, paiement) et le gateway `api.vinted.fr`
-(points relais) sont protégés par **DataDome** : sans contournement, ils
-renvoient `403` (challenge slider en JSON inline sur `www.vinted.fr`, block
-page HTML sur `api.vinted.fr`).
+The checkout flow (build checkout, payment) and the `api.vinted.fr` gateway (pickup points) are
+protected by **DataDome**: without a bypass they return `403` (a slider challenge as inline JSON
+on `www.vinted.fr`, an HTML block page on `api.vinted.fr`).
 
-### Résolution DataDome via Hyper Solutions
+### Solving DataDome with Hyper Solutions
 
-Le bypass est intégré et automatique :
+The bypass is built in and automatic:
 
-1. Installer le client TLS imitant Chrome : `pip install curl_cffi`.
-2. Fournir la clé API Hyper Solutions (<https://docs.hypersolutions.co>) au
-   constructeur (`hypersolutions_api_key=` ou variable d'environnement
-   `HYPERSOLUTIONS_API_KEY`).
-3. Le cookie `datadome` de votre navigateur (optionnel mais recommandé) :
-   requis par le gateway `api.vinted.fr`. Il se met dans le `cookie_file`.
+1. Install the Chrome-impersonating TLS client: `pip install curl_cffi`.
+2. Pass your Hyper Solutions API key (<https://docs.hypersolutions.co>) to the constructor
+   (`hypersolutions_api_key=` or the `HYPERSOLUTIONS_API_KEY` environment variable).
+3. Your browser's `datadome` cookie (optional but recommended): required by the
+   `api.vinted.fr` gateway. It goes in the `cookie_file`.
 
 ```python
 from vinted_scraper import VintedScraper
 
 with VintedScraper(
     domain="fr",
-    cookie_file="vinted_session.json",      # session + JWT + datadome navigateur
+    cookie_file="vinted_session.json",      # session + JWT + browser datadome cookie
     hypersolutions_api_key=os.environ["HYPER_API_KEY"],
 ) as v:
-    # 1. transaction (créée automatiquement si besoin)
+    # 1. transaction (created automatically if needed)
     t = v.create_transaction([item_id], seller_id)
-    # 2. build du checkout (résout le challenge DataDome automatiquement)
+    # 2. build the checkout (solves the DataDome challenge automatically)
     co = v.build_checkout(t["id"], purchase_type="transaction")
     checkout_id = co["checkout"]["id"]
-    # 3. points relais autour de l'adresse (gateway api.vinted.fr)
+    # 3. pickup points around the address (api.vinted.fr gateway)
     pts = v.get_nearby_pickup_points(checkout_id, latitude, longitude)
-    # 4. sélection d'un point (rate_uuid doit correspondre au transporteur)
+    # 4. select a point (rate_uuid must match the carrier)
     v.select_pickup_point(
         checkout_id,
         rate_uuid=pts["shipping_rates"][0]["rate_uuid"],
         point_code=pts["shipping_points"][0]["point"]["code"],
         point_uuid=pts["shipping_points"][0]["point"]["uuid"],
     )
-    # 5. paiement — ⚠️ débite réellement : confirm=True est obligatoire
+    # 5. payment — ⚠️ really charges the card: confirm=True is required
     co = v.get_checkout(checkout_id)["checkout"]
-    v.pay_checkout(checkout_id, checksum=co["checksum"], card_id=298093835, confirm=True)
+    v.pay_checkout(checkout_id, checksum=co["checksum"], card_id=card_id, confirm=True)
 ```
 
-Points d'attention :
+Things to watch:
 
-- Le `checksum` change à chaque `update_checkout` : relisez le checkout avant
-  de payer.
-- Le `point_code`/`point_uuid` doivent appartenir au transporteur du
-  `rate_uuid` choisi (un point Chronopost ne se sélectionne pas avec un tarif
-  Mondial Relay).
-- Le cookie `datadome` du navigateur expire (~30 min à 2 h) : recopiez-le
-  avec les cookies de session quand le gateway refuse (`403 access_denied`).
-- Le gateway refuse le header `Authorization` (Bearer) : géré automatiquement
-  par `get_nearby_pickup_points`.
+- The `checksum` changes on every `update_checkout`: read the checkout again before paying.
+- `point_code`/`point_uuid` must belong to the carrier of the chosen `rate_uuid` (a Chronopost
+  point cannot be selected with a Mondial Relay rate).
+- The browser's `datadome` cookie expires (about 30 min to 2 h): copy it again along with the
+  session cookies when the gateway refuses (`403 access_denied`).
+- The gateway rejects the `Authorization` (Bearer) header: `get_nearby_pickup_points` handles
+  this automatically.
 
-## Téléchargement des photos
+## Downloading photos
 
 ```python
 from vinted_scraper import VintedScraper
@@ -510,7 +505,7 @@ for path in downloaded:
     print(path)
 ```
 
-Les fichiers sont enregistrés dans le répertoire suivant :
+Files are saved in this layout:
 
 ```text
 images/
@@ -520,9 +515,9 @@ images/
     └── 03.jpg
 ```
 
-## Barre de progression
+## Progress bar
 
-La progression est désactivée par défaut :
+Progress is disabled by default:
 
 ```python
 with VintedScraper(domain="fr") as vinted:
@@ -533,11 +528,11 @@ with VintedScraper(domain="fr") as vinted:
     )
 ```
 
-Si `tqdm` n’est pas installé, `progress=True` ne provoque pas d’erreur.
+If `tqdm` is not installed, `progress=True` does not raise an error.
 
-## Domaines supportés
+## Supported domains
 
-| Code | Domaine | Locale |
+| Code | Domain | Locale |
 |---|---|---|
 | `fr` | `vinted.fr` | `fr-FR` |
 | `be` | `vinted.be` | `fr-BE` |
@@ -563,7 +558,7 @@ Si `tqdm` n’est pas installé, `progress=True` ne provoque pas d’erreur.
 | `co.uk` | `vinted.co.uk` | `en-GB` |
 | `com` | `vinted.com` | `en-US` |
 
-Exemple :
+Example:
 
 ```python
 from vinted_scraper import VintedScraper
@@ -572,7 +567,7 @@ with VintedScraper(domain="de") as vinted:
     items = vinted.search_items("jacke", pages=1)
 ```
 
-## Configuration du client
+## Client configuration
 
 ```python
 from vinted_scraper import VintedScraper
@@ -587,21 +582,21 @@ vinted = VintedScraper(
 )
 ```
 
-Principaux paramètres :
+Main parameters:
 
-| Paramètre | Description | Valeur par défaut |
+| Parameter | Description | Default |
 |---|---|---:|
-| `domain` | Domaine Vinted cible | `fr` |
-| `session_cookie` | Cookie de session pour les endpoints privés | `None` |
-| `timeout` | Timeout HTTP en secondes | `30` |
-| `retries` | Nombre de tentatives supplémentaires | `5` |
-| `verbose` | Active les logs détaillés | `False` |
-| `proxies` | Mapping de proxies transmis à la session HTTP | `None` |
-| `min_request_interval` | Intervalle minimal entre deux requêtes | `0.25` |
-| `auto_refresh_csrf` | Rafraîchit automatiquement le CSRF après un refus | `True` |
-| `bootstrap` | Initialise automatiquement la session | `True` |
+| `domain` | Target Vinted domain | `fr` |
+| `session_cookie` | Session cookie for private endpoints | `None` |
+| `timeout` | HTTP timeout in seconds | `30` |
+| `retries` | Number of extra attempts | `5` |
+| `verbose` | Enables detailed logs | `False` |
+| `proxies` | Proxy mapping passed to the HTTP session | `None` |
+| `min_request_interval` | Minimum delay between two requests | `0.25` |
+| `auto_refresh_csrf` | Refreshes the CSRF token automatically after a refusal | `True` |
+| `bootstrap` | Initializes the session automatically | `True` |
 
-Pour éviter le bootstrap automatique :
+To skip the automatic bootstrap:
 
 ```python
 vinted = VintedScraper(
@@ -614,7 +609,7 @@ vinted.refresh_session()
 
 ## Pagination
 
-Les méthodes paginées acceptent un paramètre `pages`.
+Paginated methods accept a `pages` parameter.
 
 ```python
 with VintedScraper(domain="fr") as vinted:
@@ -623,23 +618,23 @@ with VintedScraper(domain="fr") as vinted:
     all_pages = vinted.search_items("nike", pages=None)
 ```
 
-Lorsque `pages=None` ou `pages=0`, la pagination continue jusqu’à épuisement, avec une limite de sécurité de `200` pages.
+With `pages=None` or `pages=0`, pagination continues until results run out, with a safety limit of `200` pages.
 
-Le paramètre `page_size` est automatiquement limité à `96`, qui correspond à la taille maximale prise en charge par le client.
+`page_size` is automatically capped at `96`, the largest size the client supports.
 
-## Gestion des erreurs
+## Error handling
 
-Les exceptions publiques sont :
+The public exceptions are:
 
-| Exception | Situation |
+| Exception | When |
 |---|---|
-| `VintedError` | Erreur générique |
-| `VintedAuthError` | Cookie invalide, CSRF expiré ou accès refusé |
-| `VintedNotFoundError` | Ressource inexistante ou supprimée |
-| `VintedRateLimitError` | Limite de fréquence atteinte après les retries |
-| `VintedResponseError` | Réponse non JSON ou JSON illisible |
+| `VintedError` | Generic error |
+| `VintedAuthError` | Invalid cookie, expired CSRF token or access denied |
+| `VintedNotFoundError` | Resource does not exist or was deleted |
+| `VintedRateLimitError` | Rate limit hit after all retries |
+| `VintedResponseError` | Non-JSON or unreadable JSON response |
 
-Exemple :
+Example:
 
 ```python
 from vinted_scraper import (
@@ -654,25 +649,25 @@ with VintedScraper(domain="fr") as vinted:
         item = vinted.get_item(4_123_456_789)
 
     except VintedNotFoundError:
-        print("Article introuvable.")
+        print("Item not found.")
 
     except VintedRateLimitError:
-        print("Trop de requêtes. Réessayez plus tard.")
+        print("Too many requests. Try again later.")
 
     except VintedAuthError:
-        print("Accès refusé ou session expirée.")
+        print("Access denied or session expired.")
 ```
 
-Les exceptions héritent de `VintedError` et exposent également :
+All exceptions inherit from `VintedError` and also expose:
 
 - `status`
 - `url`
 - `body`
 - `message`
 
-## Ligne de commande
+## Command line
 
-Le fichier peut être exécuté directement :
+The file can be run directly:
 
 ```bash
 python vinted_scraper.py nike \
@@ -682,21 +677,21 @@ python vinted_scraper.py nike \
     --verbose
 ```
 
-Options disponibles :
+Available options:
 
 ```text
 usage: vinted_scraper.py [-h] [--domain DOMAIN] [--pages PAGES]
                          [--price-to PRICE_TO] [--verbose]
                          [query]
 
-Recherche rapide sur Vinted.
+Quick search on Vinted.
 ```
 
 ## Logging
 
-La librairie utilise le logger `vinted_scraper`.
+The library uses the `vinted_scraper` logger.
 
-Par défaut, aucun handler n’est ajouté à l’application appelante :
+By default, no handler is added to the calling application:
 
 ```python
 import logging
@@ -707,7 +702,7 @@ logger = logging.getLogger("vinted_scraper")
 logger.setLevel(logging.DEBUG)
 ```
 
-Ou activez les logs intégrés :
+Or turn on the built-in logs:
 
 ```python
 from vinted_scraper import VintedScraper
@@ -716,9 +711,9 @@ with VintedScraper(domain="fr", verbose=True) as vinted:
     vinted.search_items("nike", pages=1)
 ```
 
-## API publique
+## Public API
 
-Les principaux objets et fonctions exportés sont :
+The main exported objects and functions are:
 
 ```python
 from vinted_scraper import (
@@ -738,7 +733,7 @@ from vinted_scraper import (
 
 ### `VintedScraper`
 
-#### Catalogue
+#### Catalog
 
 - `iter_items()`
 - `search_items()`
@@ -748,7 +743,7 @@ from vinted_scraper import (
 - `get_item_price_history()`
 - `item_url()`
 
-#### Utilisateurs
+#### Users
 
 - `get_user()`
 - `get_user_stats()`
@@ -760,7 +755,7 @@ from vinted_scraper import (
 - `get_user_following()`
 - `search_users()`
 
-#### Données de référence
+#### Reference data
 
 - `get_catalog_initializers()`
 - `get_categories()`
@@ -771,54 +766,52 @@ from vinted_scraper import (
 - `get_statuses()`
 - `find_brand()`
 
-#### Messagerie
+#### Messages
 
 - `get_messages()`
 - `get_thread()`
 - `get_messages_with_user()`
 
-#### Médias et session
+#### Media and session
 
 - `download_item_images()`
 - `refresh_session()`
 - `close()`
 
-## Notes de conception
+## Design notes
 
-- Les méthodes `iter_*` sont paresseuses et adaptées au monitoring.
-- Les méthodes `get_*` retournent généralement une liste complète.
-- Les résultats paginés sont dédupliqués par identifiant lorsque cela est possible.
-- Les requêtes sont espacées par un throttle global.
-- Les erreurs `429` utilisent l’en-tête `Retry-After` lorsqu’il est fourni.
-- Les erreurs réseau et les réponses `5xx` sont automatiquement retentées.
-- Un seul rafraîchissement CSRF automatique est effectué après un `401` ou un `403`.
-- Les données d’initialisation du catalogue sont conservées en cache mémoire.
-- Le client peut être utilisé avec `with` afin de fermer proprement la session HTTP.
+- `iter_*` methods are lazy and suited to monitoring.
+- `get_*` methods usually return a complete list.
+- Paginated results are deduplicated by ID when possible.
+- Requests are spaced out by a global throttle.
+- `429` errors honor the `Retry-After` header when it is present.
+- Network errors and `5xx` responses are retried automatically.
+- A single automatic CSRF refresh is attempted after a `401` or `403`.
+- Catalog initialization data is cached in memory.
+- The client can be used with `with` so the HTTP session is closed cleanly.
 
-## Limites connues
+## Known limitations
 
-- L’API Vinted n’est pas publique et peut modifier ses endpoints ou formats de réponse.
-- Certains endpoints peuvent être indisponibles selon le domaine, le compte ou l’adresse IP.
-- Les endpoints privés nécessitent un cookie de session valide.
-- En mode anonyme, l'API de détail d'article (`/api/v2/items/{id}`) peut renvoyer
-  `404` : `get_item()` retombe alors sur le JSON-LD de la page publique (voir
-  « Récupérer un article »).
-- Les endpoints de données de référence (`initializers`, `catalogs`) peuvent être
-  bloqués en mode anonyme : `get_brands()`, `get_categories()`, `get_sizes()`…
-  renverront une erreur dans ce cas.
-- La librairie est synchrone. Dans une application asynchrone comme `discord.py`, utilisez par exemple `asyncio.to_thread()` pour éviter de bloquer la boucle principale.
-- `tqdm` est nécessaire uniquement pour afficher les barres de progression.
-- Les mécanismes anti-abus peuvent limiter ou bloquer les requêtes trop fréquentes.
+- The Vinted API is not public and may change its endpoints or response formats.
+- Some endpoints may be unavailable depending on the domain, the account or the IP address.
+- Private endpoints require a valid session cookie.
+- In anonymous mode, the item detail API (`/api/v2/items/{id}`) can return `404`: `get_item()`
+  then falls back to the public page's JSON-LD (see "Fetching an item").
+- Reference data endpoints (`initializers`, `catalogs`) can be blocked in anonymous mode:
+  `get_brands()`, `get_categories()`, `get_sizes()`… raise an error in that case.
+- The library is synchronous. In an async application such as `discord.py`, use for example `asyncio.to_thread()` to avoid blocking the event loop.
+- `tqdm` is only needed to display progress bars.
+- Anti-abuse mechanisms may throttle or block requests that are too frequent.
 
-## Pistes d’évolution
+## Ideas for later
 
-- Cache disque des données de référence avec expiration.
-- Rotation de proxies.
-- Client asynchrone basé sur `httpx.AsyncClient`.
-- Métriques sur le nombre de requêtes, les erreurs `429` et la latence.
-- Suite de tests avec réponses HTTP simulées.
-- Modèles typés dédiés pour les annonces, utilisateurs et évaluations.
+- On-disk cache for reference data, with expiry.
+- Proxy rotation.
+- Async client based on `httpx.AsyncClient`.
+- Metrics on request count, `429` errors and latency.
+- Test suite with mocked HTTP responses.
+- Dedicated typed models for listings, users and feedback.
 
-## Licence
+## License
 
 MIT License
