@@ -2470,7 +2470,7 @@ class VintedScraper:
 if __name__ == "__main__":  # pragma: no cover
     import argparse
 
-    parser = argparse.ArgumentParser(description="Recherche rapide sur Vinted.")
+    parser = argparse.ArgumentParser(description="Quick search on Vinted.")
     parser.add_argument("query", nargs="?", default="nike", help="texte recherché")
     parser.add_argument("--domain", default=DEFAULT_DOMAIN)
     parser.add_argument("--pages", type=int, default=1)

@@ -1,60 +1,58 @@
-# Vintify — Bot Discord d'alertes Vinted
+# Vintify — Discord bot for Vinted alerts
 
-Bot Discord complet pour **automatiser la recherche d'annonces** et recevoir
-des **alertes en temps réel** (nouvelles annonces, baisses de prix, ventes).
+A full Discord bot to **automate listing searches** and get **real-time alerts** (new listings,
+price drops, sales).
 
-Il s'appuie sur [`vinted_scraper.py`](../vinted_scraper.py) (à la racine du
-dépôt) en n'utilisant **que ses endpoints publics** : aucune session Vinted,
-aucun token, **pas d'offres ni d'achat**.
+It is built on [`vinted_scraper.py`](../vinted_scraper.py) (at the repository root) and uses
+**only its public endpoints**: no Vinted session, no token, **no offers or purchases**.
 
-> ⚠️ L'API Vinted est privée et non documentée. Utilisez ce bot avec
-> modération (intervalles ≥ 30 s) et dans le respect des conditions
-> d'utilisation de Vinted.
+> ⚠️ The Vinted API is private and undocumented. Use this bot in moderation (intervals ≥ 30 s)
+> and in line with Vinted's terms of service.
+
+> The bot's interface (slash commands and messages) is in French.
 
 ---
 
-## Fonctionnalités
+## Features
 
-| Commande | Description |
+| Command | Description |
 |---|---|
-| `/veille ajouter <requete>` | Surveille une recherche (texte **ou URL Vinted**) : chaque **nouvelle annonce** est signalée avec photo, prix, taille, vendeur et lien. Options : `prix_min`, `prix_max`, `marque` (autocomplétion), `intervalle`, `canal`, `mention` (`@here`, `everyone` ou un rôle). |
-| `/veille liste` | Toutes les veilles et articles suivis (état, fréquence, cible, alertes envoyées, erreurs). |
-| `/veille retirer <id>` | Supprime une veille. |
-| `/veille pause <id>` / `/veille reprendre <id>` | Met en pause / relance une veille. |
-| `/suivi ajouter <url>` | Suit un **article précis** : alerte sur **baisse de prix**, **vente/retrait**, ou retour en stock. |
-| `/suivi retirer <id>` | Arrête un suivi. |
-| `/recherche` | Recherche ponctuelle (résultats récents, avec photo et lien). |
-| `/stats` | Uptime, veilles actives, recherches, alertes envoyées, erreurs. |
-| `/aide` | Récapitulatif des commandes. |
+| `/veille ajouter <requete>` | Watches a search (text **or a Vinted URL**): every **new listing** is posted with photo, price, size, seller and link. Options: `prix_min`, `prix_max`, `marque` (autocomplete), `intervalle`, `canal`, `mention` (`@here`, `everyone` or a role). |
+| `/veille liste` | All watches and tracked items (state, frequency, target, alerts sent, errors). |
+| `/veille retirer <id>` | Deletes a watch. |
+| `/veille pause <id>` / `/veille reprendre <id>` | Pauses / resumes a watch. |
+| `/suivi ajouter <url>` | Tracks **one specific item**: alerts on a **price drop**, a **sale/removal**, or when it is back in stock. |
+| `/suivi retirer <id>` | Stops tracking an item. |
+| `/recherche` | One-off search (recent results, with photo and link). |
+| `/stats` | Uptime, active watches, searches, alerts sent, errors. |
+| `/aide` | Command summary. |
 
-Détails :
+Details:
 
-- **Aucun token de session Vinted** : bootstrap anonyme automatique
-  (cookies + CSRF gérés par `vinted_scraper`), retries et backoff intégrés.
-- **Déduplication persistante** : chaque annonce n'est signalée qu'une fois,
-  même après redémarrage (historique d'ids dans `state.json`).
-- **Premier scan immédiat** à la création d'une veille (rattrapage), puis
-  uniquement les nouveautés.
-- **Cible d'alerte flexible** : salon choisi, salon courant ou MP ; mention
-  optionnelle (`@here`, `@everyone`, nom de rôle).
-- **Suivi d'articles** : comparaison de prix à chaque cycle, alerte unique
-  par événement, désactivation automatique si l'annonce disparaît.
-- **Persistance JSON atomique** (écriture temp + `os.replace`) : compatible
-  avec un arrêt brutal.
-- **Modes de test sans Discord** : `--search` et `--selftest`.
+- **No Vinted session token**: automatic anonymous bootstrap (cookies + CSRF handled by
+  `vinted_scraper`), with built-in retries and backoff.
+- **Persistent deduplication**: each listing is posted only once, even after a restart (ID
+  history in `state.json`).
+- **Immediate first scan** when a watch is created (catch-up), then only new listings.
+- **Flexible alert target**: chosen channel, current channel or DM; optional mention (`@here`,
+  `@everyone`, role name).
+- **Item tracking**: price compared on every cycle, one alert per event, automatically disabled
+  if the listing disappears.
+- **Atomic JSON persistence** (temp file + `os.replace`): safe against a hard stop.
+- **Test modes without Discord**: `--search` and `--selftest`.
 
-## Arborescence
+## Layout
 
 ```text
 discord_bot/
-├── bot.py                 # point d'entrée (Discord + CLI de test)
+├── bot.py                 # entry point (Discord + test CLI)
 ├── vintify_bot/
-│   ├── config.py          # configuration par variables d'environnement
-│   ├── storage.py         # persistance JSON (veilles, suivis, stats)
-│   ├── vinted.py          # service Vinted asynchrone (to_thread + verrou)
-│   ├── embeds.py          # construction des embeds français
-│   ├── poller.py          # moteur de surveillance (veilles + suivis)
-│   └── cogs.py            # commandes slash
+│   ├── config.py          # configuration from environment variables
+│   ├── storage.py         # JSON persistence (watches, tracked items, stats)
+│   ├── vinted.py          # async Vinted service (to_thread + lock)
+│   ├── embeds.py          # builds the (French) embeds
+│   ├── poller.py          # monitoring engine (watches + tracked items)
+│   └── cogs.py            # slash commands
 ├── requirements.txt
 ├── Procfile               # worker: python bot.py
 └── .env.example
@@ -62,109 +60,102 @@ discord_bot/
 
 ---
 
-## Démarrage rapide (local)
+## Quick start (local)
 
 ```bash
-# depuis la racine du dépôt
+# from the repository root
 python -m venv .venv
-.venv\Scripts\activate            # Windows  (source .venv/bin/activate sur Linux/macOS)
+.venv\Scripts\activate            # Windows  (source .venv/bin/activate on Linux/macOS)
 pip install -r discord_bot\requirements.txt
 
 cd discord_bot
-copy .env.example .env            # puis renseignez DISCORD_TOKEN
+copy .env.example .env            # then fill in DISCORD_TOKEN
 python bot.py
 ```
 
-Sans token (test rapide du scraping) :
+Without a token (quick scraping test):
 
 ```bash
 python bot.py --search "nike tn" --price-to 60
 python bot.py --selftest
 ```
 
-## Créer le bot Discord
+## Creating the Discord bot
 
-1. Rendez-vous sur <https://discord.com/developers/applications> → **New Application**.
-2. Onglet **Bot** → **Reset Token** → copiez le token (variable `DISCORD_TOKEN`).
-3. Onglet **OAuth2 → URL Generator** :
-   - scope **`bot`** + **`applications.commands`** ;
-   - permissions : **View Channels**, **Send Messages**, **Embed Links**
-     (et **Mention Everyone** si vous utilisez `@here`/`@everyone`) ;
-   - ouvrez l'URL générée pour inviter le bot sur votre serveur.
-4. Lancez le bot : les commandes slash apparaissent après la synchronisation
-   (quelques secondes après le démarrage).
+1. Go to <https://discord.com/developers/applications> → **New Application**.
+2. **Bot** tab → **Reset Token** → copy the token (`DISCORD_TOKEN` variable).
+3. **OAuth2 → URL Generator** tab:
+   - scopes **`bot`** + **`applications.commands`**;
+   - permissions: **View Channels**, **Send Messages**, **Embed Links** (and **Mention
+     Everyone** if you use `@here`/`@everyone`);
+   - open the generated URL to invite the bot to your server.
+4. Start the bot: the slash commands appear once they are synced (a few seconds after startup).
 
 ---
 
-## Déploiement sur Railway
+## Deploying on Railway
 
-1. **Poussez le dépôt sur GitHub** (le bot vit dans `discord_bot/`, la racine
-   du dépôt contient `vinted_scraper.py` et `railway.json`).
-2. Dans Railway : **New Project → Deploy from GitHub repo** → sélectionnez le
-   dépôt. `railway.json` est détecté automatiquement :
-   - `rootDirectory: discord_bot` → build Nixpacks Python ;
-   - `startCommand: python bot.py` (équivalent au `Procfile`).
-3. **Variables d'environnement** (Railway → Variables) :
-   - `DISCORD_TOKEN` : le token du bot (obligatoire) ;
-   - `VINTED_DOMAIN` : `fr` par défaut (optionnel) ;
-   - `LOG_LEVEL`, `VEILLE_INTERVALLE_DEFAUT`, `VEILLE_PAGE_SIZE`, … (optionnels,
-     voir `.env.example`).
-4. **Volume persistant** (recommandé) : Railway → onglet **Volumes** → créez
-   un volume monté sur **`/data`**, puis définissez la variable
-   **`DATA_DIR=/data`**. Sans volume, les veilles et l'historique d'annonces
-   sont perdus à chaque redéploiement.
-5. **Déployez.** Vérifiez dans les logs l'apparition de :
-   `Commandes slash synchronisées : N`.
+1. **Push the repository to GitHub** (the bot lives in `discord_bot/`; the repository root
+   holds `vinted_scraper.py` and `railway.json`).
+2. In Railway: **New Project → Deploy from GitHub repo** → pick the repository. `railway.json`
+   is detected automatically:
+   - `rootDirectory: discord_bot` → Nixpacks Python build;
+   - `startCommand: python bot.py` (same as the `Procfile`).
+3. **Environment variables** (Railway → Variables):
+   - `DISCORD_TOKEN`: the bot token (required);
+   - `VINTED_DOMAIN`: `fr` by default (optional);
+   - `LOG_LEVEL`, `VEILLE_INTERVALLE_DEFAUT`, `VEILLE_PAGE_SIZE`, … (optional, see
+     `.env.example`).
+4. **Persistent volume** (recommended): Railway → **Volumes** tab → create a volume mounted on
+   **`/data`**, then set **`DATA_DIR=/data`**. Without a volume, watches and listing history are
+   lost on every redeploy.
+5. **Deploy.** Check that the logs show: `Commandes slash synchronisées : N`.
 
-Redéploiements et crashs : Railway relance automatiquement le worker
+Redeploys and crashes: Railway restarts the worker automatically
 (`restartPolicyType: ON_FAILURE`).
 
-### Notes Railway
+### Railway notes
 
-- Le `Procfile` est un filet de sécurité : si vous le supprimez, le
-  `startCommand` de `railway.json` prend le relais.
-- Le plan gratuit suffit pour un usage personnel (une poignée de veilles).
-- Si vous déployez **uniquement** le dossier `discord_bot/` (sans la racine),
-  copiez `vinted_scraper.py` à l'intérieur : `bot.py` l'importe depuis la
-  racine du dépôt par défaut.
+- The `Procfile` is a safety net: if you delete it, the `startCommand` in `railway.json` takes
+  over.
+- The free plan is enough for personal use (a handful of watches).
+- If you deploy **only** the `discord_bot/` folder (without the root), copy `vinted_scraper.py`
+  into it: by default `bot.py` imports it from the repository root.
 
 ---
 
-## Variables d'environnement
+## Environment variables
 
-| Variable | Défaut | Description |
+| Variable | Default | Description |
 |---|---|---|
-| `DISCORD_TOKEN` | — | Token du bot Discord (**obligatoire**) |
-| `VINTED_DOMAIN` | `fr` | Domaine Vinted (`fr`, `be`, `de`, `es`, `it`, `pl`, `co.uk`, `com`, …) |
-| `DATA_DIR` | `data` | Répertoire de persistance (volume Railway → `/data`) |
-| `VEILLE_INTERVALLE_DEFAUT` | `60` | Intervalle par défaut des veilles (s, min 30) |
-| `SUIVI_INTERVALLE_DEFAUT` | `300` | Intervalle par défaut des suivis (s, min 30) |
-| `VEILLE_PAGE_SIZE` | `24` | Annonces lues par cycle (max 96) |
-| `VEILLE_HISTORIQUE_MAX` | `1500` | Ids vus conservés par veille |
-| `RECHERCHE_MAX_AFFICHEE` | `5` | Résultats max d'une `/recherche` |
-| `VEILLE_SCAN_INITIAL` | `1` | Scan immédiat à la création d'une veille |
+| `DISCORD_TOKEN` | — | Discord bot token (**required**) |
+| `VINTED_DOMAIN` | `fr` | Vinted domain (`fr`, `be`, `de`, `es`, `it`, `pl`, `co.uk`, `com`, …) |
+| `DATA_DIR` | `data` | Persistence directory (Railway volume → `/data`) |
+| `VEILLE_INTERVALLE_DEFAUT` | `60` | Default watch interval (s, min 30) |
+| `SUIVI_INTERVALLE_DEFAUT` | `300` | Default item tracking interval (s, min 30) |
+| `VEILLE_PAGE_SIZE` | `24` | Listings read per cycle (max 96) |
+| `VEILLE_HISTORIQUE_MAX` | `1500` | Seen IDs kept per watch |
+| `RECHERCHE_MAX_AFFICHEE` | `5` | Max results shown by `/recherche` |
+| `VEILLE_SCAN_INITIAL` | `1` | Immediate scan when a watch is created |
 | `LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR` |
 
 ---
 
-## Limites et bonnes pratiques
+## Limitations and good practice
 
-- L'API Vinted peut changer ou bloquer selon l'adresse IP : le bot réessaie
-  automatiquement (retries + backoff, rafraîchissement CSRF).
-- Ne créez pas des dizaines de veilles à 30 s : restez raisonnable
-  (intervalle ≥ 60 s recommandé, total de requêtes modéré).
-- Les prix affichés proviennent de l'API : les frais d'achat peuvent varier.
-- Le suivi d'article détecte les changements de prix entre deux cycles :
-  une baisse très brève peut passer inaperçue selon l'intervalle choisi.
-- **Marques** : Vinted ne permet plus de chercher une marque par nom sans
-  session. Seules les marques populaires (Nike, adidas, H&M, Levi's…) sont
-  résolubles par nom ; pour les autres, appliquez le filtre marque sur
-  vinted.fr puis collez l'URL obtenue (elle contient `brand_ids[]=…`).
-- **Suivi d'articles** : si l'API de détail est bloquée, le prix et la
-  disponibilité sont lus sur la page publique de l'article (JSON-LD) —
-  mêmes valeurs, mais taille/vendeur ne sont alors pas disponibles.
-- **Test sans bot** : `python bot.py --search "…"` (recherche live) et
-  `python bot.py --selftest` (env + persistance + recherche).
-  `python _integration_test.py` (dans `discord_bot/`) valide le moteur de
-  polling (déduplication, baisse de prix, annonce introuvable) avec du
-  réseau réel.
+- The Vinted API may change or block depending on the IP address: the bot retries
+  automatically (retries + backoff, CSRF refresh).
+- Do not create dozens of watches at 30 s: stay reasonable (interval ≥ 60 s recommended,
+  moderate total request count).
+- Displayed prices come from the API: purchase fees may vary.
+- Item tracking detects price changes between two cycles: a very short-lived drop can go
+  unnoticed depending on the interval.
+- **Brands**: Vinted no longer allows searching a brand by name without a session. Only
+  popular brands (Nike, adidas, H&M, Levi's…) can be resolved by name; for the others, apply
+  the brand filter on vinted.fr and paste the resulting URL (it contains `brand_ids[]=…`).
+- **Item tracking**: if the detail API is blocked, price and availability are read from the
+  item's public page (JSON-LD) — same values, but size and seller are then unavailable.
+- **Testing without the bot**: `python bot.py --search "…"` (live search) and
+  `python bot.py --selftest` (env + persistence + search). `python _integration_test.py` (in
+  `discord_bot/`) checks the polling engine (deduplication, price drop, listing not found)
+  against the real network.
